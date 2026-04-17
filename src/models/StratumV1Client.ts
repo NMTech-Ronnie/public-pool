@@ -140,7 +140,17 @@ export class StratumV1Client {
 
   public async destroy() {
     if (this.extraNonceAndSessionId) {
-      await this.clientService.delete(this.extraNonceAndSessionId);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await this.clientService.delete(this.extraNonceAndSessionId);
+          break;
+        } catch (e) {
+          if (attempt < 2 && e?.driverError?.code === 'SQLITE_BUSY') {
+            await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+          }
+          // Silently drop on final failure — client record will be cleaned up by killDeadClients
+        }
+      }
     }
 
     if (this.stratumSubscription != null) {
@@ -189,9 +199,6 @@ export class StratumV1Client {
               this.clientStatisticsService,
             );
             this.extraNonceAndSessionId = this.getRandomHexString();
-            console.log(
-              `New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`,
-            );
           }
 
           this.clientSubscription = subscriptionMessage;
@@ -205,14 +212,12 @@ export class StratumV1Client {
             return;
           }
         } else {
-          console.error('Subscription validation error');
           const err = new StratumErrorMessage(
             subscriptionMessage.id,
             eStratumErrorCode.OtherUnknown,
             'Subscription validation error',
             errors,
           ).response();
-          console.error(err);
           const success = await this.write(err);
           if (!success) {
             return;
@@ -244,14 +249,12 @@ export class StratumV1Client {
             return;
           }
         } else {
-          console.error('Configuration validation error');
           const err = new StratumErrorMessage(
             configurationMessage.id,
             eStratumErrorCode.OtherUnknown,
             'Configuration validation error',
             errors,
           ).response();
-          console.error(err);
           const success = await this.write(err);
           if (!success) {
             return;
@@ -283,14 +286,12 @@ export class StratumV1Client {
             return;
           }
         } else {
-          console.error('Authorization validation error');
           const err = new StratumErrorMessage(
             authorizationMessage.id,
             eStratumErrorCode.OtherUnknown,
             'Authorization validation error',
             errors,
           ).response();
-          console.error(err);
           const success = await this.write(err);
           if (!success) {
             return;
@@ -332,14 +333,12 @@ export class StratumV1Client {
           }
           this.usedSuggestedDifficulty = true;
         } else {
-          console.error('Suggest difficulty validation error');
           const err = new StratumErrorMessage(
             suggestDifficultyMessage.id,
             eStratumErrorCode.OtherUnknown,
             'Suggest difficulty validation error',
             errors,
           ).response();
-          console.error(err);
           const success = await this.write(err);
           if (!success) {
             return;
@@ -670,6 +669,9 @@ export class StratumV1Client {
   }
 
   public async checkDifficulty() {
+    if (this.statistics == null) {
+      return;
+    }
     const targetDiff = this.statistics.getSuggestedDifficulty(
       this.sessionDifficulty,
     );

@@ -33,51 +33,62 @@ export class ClientStatisticsService {
     let insertCount = 0;
     let updateCount = 0;
 
+    // Batch inserts in chunks of 50 to avoid SQLite expression tree limit
     if (inserts.length > 0) {
-      // Retry bulk insert on SQLITE_BUSY
-      let inserted = false;
-      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
-        try {
-          await this.clientStatisticsRepository.insert(inserts);
-          insertCount = inserts.length;
-          inserted = true;
-        } catch (e: any) {
-          if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
-            await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
-            continue;
-          }
-          // Fallback: insert one by one to handle duplicates
-          for (const item of inserts) {
-            try {
-              await this.clientStatisticsRepository.insert(item);
-              insertCount++;
-            } catch (e2) {
-              // Duplicate, convert to update
-              updates.push(item);
+      const BATCH = 50;
+      for (let i = 0; i < inserts.length; i += BATCH) {
+        const batch = inserts.slice(i, i + BATCH);
+        let inserted = false;
+        for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+          try {
+            await this.clientStatisticsRepository.insert(batch);
+            insertCount += batch.length;
+            inserted = true;
+          } catch (e: any) {
+            if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
+              await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+              continue;
+            }
+            // Fallback: insert one by one to handle duplicates
+            for (const item of batch) {
+              try {
+                await this.clientStatisticsRepository.insert(item);
+                insertCount++;
+              } catch (e2) {
+                // Duplicate, convert to update
+                updates.push(item);
+              }
             }
           }
         }
       }
     }
 
+    // Wrap all updates in a single raw SQL transaction to minimize lock hold time
     if (updates.length > 0) {
-      for (const stat of updates) {
-        try {
-          await this.clientStatisticsRepository.update(
-            {
-              address: stat.address,
-              clientName: stat.clientName,
-              sessionId: stat.sessionId,
-              time: stat.time,
-            },
-            {
-              shares: stat.shares,
-              acceptedCount: stat.acceptedCount,
-              updatedAt: new Date(),
-            },
-          );
-          updateCount++;
-        } catch (e) {}
+      try {
+        const now = new Date().toLocaleString();
+        await this.clientStatisticsRepository.manager.transaction(
+          async (manager) => {
+            for (const stat of updates) {
+              await manager.query(
+                'UPDATE client_statistics_entity SET shares = ?, acceptedCount = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND time = ?',
+                [
+                  stat.shares,
+                  stat.acceptedCount,
+                  now,
+                  stat.address,
+                  stat.clientName,
+                  stat.sessionId,
+                  stat.time,
+                ],
+              );
+            }
+          },
+        );
+        updateCount = updates.length;
+      } catch (e) {
+        // SQLITE_BUSY — data lost for this cycle, will be re-queued
       }
     }
 

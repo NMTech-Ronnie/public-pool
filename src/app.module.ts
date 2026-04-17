@@ -48,7 +48,7 @@ const ORMModules = [
       autoLoadEntities: true,
       logging: false,
       enableWAL: true,
-      busyTimeout: 30 * 1000,
+      busyTimeout: 2 * 1000,
     }),
     CacheModule.register(),
     ScheduleModule.forRoot(),

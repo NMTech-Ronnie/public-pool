@@ -629,6 +629,8 @@ export class StratumV1Client {
 
       if (submissionDifficulty > this.entity.bestDifficulty) {
         this.clientService.queueBestDifficulty(
+          this.clientAuthorization.address,
+          this.clientAuthorization.worker,
           this.extraNonceAndSessionId,
           submissionDifficulty,
         );

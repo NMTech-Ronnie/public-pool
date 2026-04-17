@@ -12,8 +12,8 @@ import { NotificationService } from './notification.service';
 import { IJobTemplate, StratumV1JobsService } from './stratum-v1-jobs.service';
 import { ExternalSharesService } from './external-shares.service';
 
-const FLUSH_INTERVAL_MS = 10_000; // Batch flush every 10s
-const INSERT_CLIENTS_INTERVAL_MS = 5_000; // Insert new clients every 5s
+const FLUSH_INTERVAL_MS = 30_000; // Batch flush every 30s (reduced contention with 4 workers)
+const INSERT_CLIENTS_INTERVAL_MS = 10_000; // Insert new clients every 10s
 const DIFFICULTY_CHECK_INTERVAL_MS = 60_000; // Check difficulty every 60s
 const STATS_LOG_INTERVAL_MS = 30_000; // Log worker stats every 30s
 const MAX_CLIENTS_PER_WORKER = 10_000;

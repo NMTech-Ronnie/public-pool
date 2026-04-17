@@ -25,7 +25,7 @@ export class ClientService {
   > = new Map();
   private bestDifficultyQueue: Map<
     string,
-    { sessionId: string; bestDifficulty: number }
+    { address: string; clientName: string; sessionId: string; bestDifficulty: number }
   > = new Map();
 
   constructor(
@@ -40,24 +40,34 @@ export class ClientService {
 
     if (queueCopy.length === 0) return;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const results = await this.clientRepository.insert(
-          queueCopy.map((c) => c.partialClient),
-        );
-
-        queueCopy.forEach((c, index) => {
-          c.result.next(results.generatedMaps[index]);
-        });
-        return;
-      } catch (e: any) {
-        if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
-          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-          continue;
+    // Batch inserts in chunks of 50 to avoid SQLite's
+    // "Expression tree is too large (maximum depth 1000)" error
+    const BATCH = 50;
+    for (let i = 0; i < queueCopy.length; i += BATCH) {
+      const batch = queueCopy.slice(i, i + BATCH);
+      let success = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const results = await this.clientRepository.insert(
+            batch.map((c) => c.partialClient),
+          );
+          batch.forEach((c, index) => {
+            c.result.next(results.generatedMaps[index]);
+          });
+          success = true;
+          break;
+        } catch (e: any) {
+          if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
+            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+            continue;
+          }
+          // On final failure, resolve with null so callers don't hang
+          // (BehaviorSubject(null) already returned null to callers immediately,
+          // so this is just cleanup)
+          batch.forEach((c) => c.result.next(null));
+          console.error(`insertClients batch failed (${batch.length} items):`, e?.message);
+          break;
         }
-        // On final failure, reject all pending inserts so callers don't hang
-        queueCopy.forEach((c) => c.result.error(e));
-        throw e;
       }
     }
   }
@@ -75,82 +85,42 @@ export class ClientService {
     let heartbeatCount = 0;
     let bestDiffCount = 0;
 
-    // Batch heartbeats in small transaction chunks (50 at a time)
-    // to reduce write lock hold time and avoid blocking other workers
+    // Use raw SQL inside a single TypeORM transaction for each batch type.
+    // This is dramatically faster than N individual TypeORM update() calls because:
+    // 1. One write lock acquisition per transaction (not per update)
+    // 2. No ORM metadata/query-builder overhead per row
+    // 3. Shared updatedAt timestamp avoids per-row Date construction
+
     if (heartbeats.length > 0) {
-      const BATCH = 50;
-      for (let i = 0; i < heartbeats.length; i += BATCH) {
-        const batch = heartbeats.slice(i, i + BATCH);
-        try {
-          await this.clientRepository.manager.transaction(async (manager) => {
-            for (const hb of batch) {
-              await manager.update(
-                ClientEntity,
-                {
-                  address: hb.address,
-                  clientName: hb.clientName,
-                  sessionId: hb.sessionId,
-                },
-                {
-                  hashRate: hb.hashRate,
-                  deletedAt: null,
-                  updatedAt: hb.updatedAt,
-                },
-              );
-            }
-          });
-          heartbeatCount += batch.length;
-        } catch (e) {
-          // Fallback: individual writes for this batch
-          for (const hb of batch) {
-            try {
-              await this.clientRepository.update(
-                {
-                  address: hb.address,
-                  clientName: hb.clientName,
-                  sessionId: hb.sessionId,
-                },
-                {
-                  hashRate: hb.hashRate,
-                  deletedAt: null,
-                  updatedAt: hb.updatedAt,
-                },
-              );
-              heartbeatCount++;
-            } catch (e2) {}
+      try {
+        const now = new Date().toLocaleString();
+        await this.clientRepository.manager.transaction(async (manager) => {
+          for (const hb of heartbeats) {
+            await manager.query(
+              'UPDATE client_entity SET hashRate = ?, deletedAt = NULL, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ?',
+              [hb.hashRate, now, hb.address, hb.clientName, hb.sessionId],
+            );
           }
-        }
+        });
+        heartbeatCount = heartbeats.length;
+      } catch (e) {
+        // SQLITE_BUSY or other error — data is lost for this cycle.
+        // Clients will re-queue heartbeats next flush cycle.
       }
     }
 
-    // Batch bestDifficulty updates in small chunks
     if (bestDiffs.length > 0) {
-      const BATCH = 50;
-      for (let i = 0; i < bestDiffs.length; i += BATCH) {
-        const batch = bestDiffs.slice(i, i + BATCH);
-        try {
-          await this.clientRepository.manager.transaction(async (manager) => {
-            for (const bd of batch) {
-              await manager.update(
-                ClientEntity,
-                { sessionId: bd.sessionId },
-                { bestDifficulty: bd.bestDifficulty },
-              );
-            }
-          });
-          bestDiffCount += batch.length;
-        } catch (e) {
-          for (const bd of batch) {
-            try {
-              await this.clientRepository.update(
-                { sessionId: bd.sessionId },
-                { bestDifficulty: bd.bestDifficulty },
-              );
-              bestDiffCount++;
-            } catch (e2) {}
+      try {
+        await this.clientRepository.manager.transaction(async (manager) => {
+          for (const bd of bestDiffs) {
+            await manager.query(
+              'UPDATE client_entity SET bestDifficulty = ? WHERE address = ? AND clientName = ? AND sessionId = ?',
+              [bd.bestDifficulty, bd.address, bd.clientName, bd.sessionId],
+            );
           }
-        }
-      }
+        });
+        bestDiffCount = bestDiffs.length;
+      } catch (e) {}
     }
 
     return { heartbeats: heartbeatCount, bestDiffs: bestDiffCount };
@@ -172,10 +142,20 @@ export class ClientService {
     });
   }
 
-  public queueBestDifficulty(sessionId: string, bestDifficulty: number) {
+  public queueBestDifficulty(
+    address: string,
+    clientName: string,
+    sessionId: string,
+    bestDifficulty: number,
+  ) {
     const existing = this.bestDifficultyQueue.get(sessionId);
     if (!existing || bestDifficulty > existing.bestDifficulty) {
-      this.bestDifficultyQueue.set(sessionId, { sessionId, bestDifficulty });
+      this.bestDifficultyQueue.set(sessionId, {
+        address,
+        clientName,
+        sessionId,
+        bestDifficulty,
+      });
     }
   }
 

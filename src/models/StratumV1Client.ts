@@ -4,7 +4,6 @@ import { plainToInstance } from 'class-transformer';
 import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
 import { Socket } from 'net';
-import { Subscription } from 'rxjs';
 // clearInterval import removed – per-client timers eliminated
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
@@ -76,7 +75,8 @@ export class StratumV1Client {
   private clientConfiguration: ConfigurationMessage;
   private clientAuthorization: AuthorizationMessage;
   private clientSuggestedDifficulty: SuggestDifficulty;
-  private stratumSubscription: Subscription;
+
+  public readonly createdAt = Date.now();
 
   private statistics: StratumV1ClientStatistics;
   private stratumInitialized = false;
@@ -123,6 +123,14 @@ export class StratumV1Client {
 
     this.socket.on('data', (data: Buffer) => {
       this.buffer += data.toString();
+
+      // Prevent memory abuse from clients sending data without newlines
+      if (this.buffer.length > 10240) {
+        this.socket.end();
+        this.socket.destroy();
+        return;
+      }
+
       const lines = this.buffer.split('\n');
       this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 
@@ -151,10 +159,6 @@ export class StratumV1Client {
           // Silently drop on final failure — client record will be cleaned up by killDeadClients
         }
       }
-    }
-
-    if (this.stratumSubscription != null) {
-      this.stratumSubscription.unsubscribe();
     }
   }
 
@@ -423,21 +427,26 @@ export class StratumV1Client {
       }
     }
 
-    this.stratumSubscription =
-      this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
+    // Send the current mining job immediately (subsequent jobs distributed by service)
+    const latestTemplateId = this.stratumV1JobsService.latestStoredTemplateId;
+    if (latestTemplateId != null) {
+      const jobTemplate =
+        this.stratumV1JobsService.getJobTemplateById(latestTemplateId);
+      if (jobTemplate != null) {
         try {
-          if (jobTemplate.blockData.clearJobs) {
-            this.miningSubmissionHashes.clear();
-          }
-          await this.sendNewMiningJob(jobTemplate);
+          this.sendNewMiningJob(jobTemplate);
         } catch (e) {
-          await this.socket.end();
           this.workerStats.streamErrors++;
         }
-      });
+      }
+    }
   }
 
-  private async sendNewMiningJob(jobTemplate: IJobTemplate) {
+  public clearSubmissionHashes() {
+    this.miningSubmissionHashes.clear();
+  }
+
+  public sendNewMiningJob(jobTemplate: IJobTemplate) {
     let payoutInformation;
     const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
     //50Th/s
@@ -508,7 +517,10 @@ export class StratumV1Client {
       this.write(err);
       return false;
     } else {
-      this.miningSubmissionHashes.add(submissionKey);
+      // Cap dedup set to prevent unbounded memory growth between blocks
+      if (this.miningSubmissionHashes.size < 50000) {
+        this.miningSubmissionHashes.add(submissionKey);
+      }
     }
 
     const job = this.stratumV1JobsService.getJobById(submission.jobId);
@@ -549,6 +561,22 @@ export class StratumV1Client {
         console.log('!!! BLOCK FOUND !!!');
         this.workerStats.blocksFound++;
         // Full block reconstruction only for the extremely rare block-found case
+        // If transactions were stripped from an old template, re-fetch them
+        if (!jobTemplate.block.transactions || jobTemplate.block.transactions.length <= 1) {
+          console.warn('Block found on stripped template, re-fetching transactions...');
+          try {
+            const rawTemplate = await this.bitcoinRpcService.getBlockTemplate(jobTemplate.blockData.height);
+            const txs = rawTemplate.transactions.map(t => bitcoinjs.Transaction.fromHex(t.data));
+            const tempCoinbaseTx = new bitcoinjs.Transaction();
+            tempCoinbaseTx.version = 2;
+            tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
+            tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
+            txs.unshift(tempCoinbaseTx);
+            jobTemplate.block.transactions = txs;
+          } catch (e: any) {
+            console.error('CRITICAL: Failed to re-fetch transactions for block submission:', e?.message);
+          }
+        }
         const updatedJobBlock = job.copyAndUpdateBlock(
           jobTemplate,
           versionMask,
@@ -749,6 +777,10 @@ export class StratumV1Client {
   private write(message: string): boolean {
     try {
       if (!this.socket.destroyed && !this.socket.writableEnded) {
+        // Backpressure: skip write if socket buffer exceeds 64KB
+        if (this.socket.writableLength > 65536) {
+          return true;
+        }
         this.socket.write(message, (error) => {
           if (error) {
             this.destroy();

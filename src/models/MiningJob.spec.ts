@@ -94,6 +94,7 @@ describe('MiningJob', () => {
           networkDifficulty: 0,
           height: 0,
           clearJobs: false,
+          blockWeight: block.weight(),
         },
       } as IJobTemplate;
     });
@@ -175,6 +176,7 @@ describe('MiningJob', () => {
 
     it("should use the POOL_IDENTIFIER if it doesn't make the script size too big with identifier abcabc", () => {
       jobTemplate.block.transactions = []; // remove transactions because we only want to test the script size
+      jobTemplate.blockData.blockWeight = 0;
       const expectedMiningIdentifier = 'A'.repeat(88); // 88 chars is the maximum size validated against bitcoin core in regtest
       configService.get = jest.fn((key: string) => {
         switch (key) {
@@ -203,6 +205,7 @@ describe('MiningJob', () => {
     it('should remove pool identifier if script is too big with identifier', () => {
       const expectedMiningIdentifier = '';
       jobTemplate.block.transactions = []; // remove transactions because we only want to test the script size
+      jobTemplate.blockData.blockWeight = 0;
       configService.get = jest.fn((key: string) => {
         switch (key) {
           case 'POOL_IDENTIFIER':

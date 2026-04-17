@@ -3,8 +3,10 @@ import * as bitcoinjs from 'bitcoinjs-lib';
 import * as merkle from 'merkle-lib';
 import * as merkleProof from 'merkle-lib/proof';
 import {
+  catchError,
   combineLatest,
   delay,
+  EMPTY,
   filter,
   from,
   interval,
@@ -30,6 +32,7 @@ export interface IJobTemplate {
     networkDifficulty: number;
     height: number;
     clearJobs: boolean;
+    blockWeight: number;
   };
 }
 
@@ -79,6 +82,10 @@ export class StratumV1JobsService {
               blockTemplate,
               interval,
             };
+          }),
+          catchError((error) => {
+            console.error(`[Jobs] getBlockTemplate failed: ${error.message}`);
+            return EMPTY;
           }),
         );
       }),
@@ -169,6 +176,9 @@ export class StratumV1JobsService {
             true,
           );
 
+          // Pre-compute block weight before transactions may be stripped
+          const blockWeight = block.weight();
+
           const id = this.getNextTemplateId();
           this.latestJobTemplateId++;
           return {
@@ -181,6 +191,7 @@ export class StratumV1JobsService {
               networkDifficulty,
               height,
               clearJobs,
+              blockWeight,
             },
           };
         },
@@ -213,6 +224,15 @@ export class StratumV1JobsService {
             if (!(templateId in this.blocks)) {
               this.cachedJobs.delete(key);
             }
+          }
+        }
+        // Strip transactions from previous templates to save memory.
+        // Each template holds ~3000 parsed Transaction objects (~12MB).
+        // Only the latest template keeps transactions for the rare block-found case.
+        for (const templateId in this.blocks) {
+          const tpl = this.blocks[templateId];
+          if (tpl.block.transactions && tpl.block.transactions.length > 1) {
+            tpl.block.transactions = null;
           }
         }
         this.blocks[data.blockData.id] = data;

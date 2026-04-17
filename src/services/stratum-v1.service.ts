@@ -9,12 +9,15 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { ClientService } from '../ORM/client/client.service';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
 import { NotificationService } from './notification.service';
-import { StratumV1JobsService } from './stratum-v1-jobs.service';
+import { IJobTemplate, StratumV1JobsService } from './stratum-v1-jobs.service';
 import { ExternalSharesService } from './external-shares.service';
 
 const FLUSH_INTERVAL_MS = 10_000; // Batch flush every 10s
 const DIFFICULTY_CHECK_INTERVAL_MS = 60_000; // Check difficulty every 60s
 const STATS_LOG_INTERVAL_MS = 30_000; // Log worker stats every 30s
+const MAX_CLIENTS_PER_WORKER = 10_000;
+const IDLE_HANDSHAKE_TIMEOUT_MS = 30_000; // Kick clients not authorized within 30s
+const JOB_DISTRIBUTION_BATCH_SIZE = 100;
 
 interface IWorkerSnapshot {
   workerId: string;
@@ -61,6 +64,7 @@ export class StratumV1Service implements OnModuleInit {
     setTimeout(() => {
       this.startSocketServer();
       this.startCentralizedTimers();
+      this.startCentralizedJobDistribution();
     }, 1000 * 10);
   }
 
@@ -99,8 +103,31 @@ export class StratumV1Service implements OnModuleInit {
       }
     }, FLUSH_INTERVAL_MS);
 
-    // 3. Worker statistics logging every 30s
+    // 3. Worker statistics logging every 30s + idle connection cleanup
     setInterval(() => {
+      // Kick idle connections that haven't completed handshake
+      const now = Date.now();
+      const idleClients: StratumV1Client[] = [];
+      for (const client of this.clients) {
+        if (
+          !client.isWorking() &&
+          now - client.createdAt > IDLE_HANDSHAKE_TIMEOUT_MS
+        ) {
+          idleClients.push(client);
+        }
+      }
+      for (const client of idleClients) {
+        try {
+          client.socket.end();
+          client.socket.destroy();
+        } catch (_) {}
+      }
+      if (idleClients.length > 0) {
+        console.log(
+          `[Worker ${this.workerId}] Kicked ${idleClients.length} idle connections (handshake timeout)`,
+        );
+      }
+
       let subscribedClients = 0;
       let authorizedClients = 0;
       let workingClients = 0;
@@ -117,8 +144,10 @@ export class StratumV1Service implements OnModuleInit {
       }
 
       this.workerStats.activeClients = this.clients.size;
+      const mem = process.memoryUsage();
       console.log(
         `[Worker ${this.workerId}] active=${this.clients.size}` +
+          ` heap=${Math.round(mem.heapUsed / 1048576)}/${Math.round(mem.heapTotal / 1048576)}MB rss=${Math.round(mem.rss / 1048576)}MB` +
           ` subscribed=${subscribedClients} authorized=${authorizedClients} working=${workingClients}` +
           ` conn=+${this.workerStats.connections} disc=+${this.workerStats.disconnections}` +
           ` sub=+${this.workerStats.subscriptions} auth=+${this.workerStats.authorizations} init=+${this.workerStats.stratumInitialized}` +
@@ -159,8 +188,61 @@ export class StratumV1Service implements OnModuleInit {
     }, STATS_LOG_INTERVAL_MS);
   }
 
+  /**
+   * Subscribe to newMiningJob$ once per worker and distribute to all clients in batches.
+   * This replaces per-client RxJS subscriptions to avoid event loop starvation.
+   */
+  private startCentralizedJobDistribution() {
+    this.stratumV1JobsService.newMiningJob$.subscribe((jobTemplate) => {
+      this.distributeJobToClients(jobTemplate);
+    });
+  }
+
+  private async distributeJobToClients(jobTemplate: IJobTemplate) {
+    const clientArray = [...this.clients];
+    let distributed = 0;
+    let errors = 0;
+
+    for (let i = 0; i < clientArray.length; i += JOB_DISTRIBUTION_BATCH_SIZE) {
+      const end = Math.min(
+        i + JOB_DISTRIBUTION_BATCH_SIZE,
+        clientArray.length,
+      );
+      for (let j = i; j < end; j++) {
+        const client = clientArray[j];
+        if (!client.isWorking()) continue;
+        try {
+          if (jobTemplate.blockData.clearJobs) {
+            client.clearSubmissionHashes();
+          }
+          client.sendNewMiningJob(jobTemplate);
+          distributed++;
+        } catch (e) {
+          errors++;
+        }
+      }
+      // Yield to event loop between batches to avoid starvation
+      if (end < clientArray.length) {
+        await new Promise<void>((r) => setImmediate(r));
+      }
+    }
+
+    console.log(
+      `[Worker ${this.workerId}] Job h=${jobTemplate.blockData.height} distributed to ${distributed}/${clientArray.length} clients` +
+        (errors > 0 ? ` (${errors} errors)` : '') +
+        ` clearJobs=${jobTemplate.blockData.clearJobs}`,
+    );
+  }
+
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
+      // Reject if at capacity
+      if (this.clients.size >= MAX_CLIENTS_PER_WORKER) {
+        socket.end();
+        socket.destroy();
+        return;
+      }
+
       //5 min
       socket.setTimeout(1000 * 60 * 5);
 

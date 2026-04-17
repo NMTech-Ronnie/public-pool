@@ -89,7 +89,7 @@ export class MiningJob {
 
     // Check if the pool identifier is too long
     if (
-      this.coinbaseTransaction.weight() + jobTemplate.block.weight() >
+      this.coinbaseTransaction.weight() + jobTemplate.blockData.blockWeight >
       MAX_BLOCK_WEIGHT
     ) {
       console.warn(

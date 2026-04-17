@@ -251,6 +251,10 @@ describe('StratumV1Client', () => {
 
     jest.setSystemTime(date);
 
+    // Warm up the pipeline after setting system time so template timestamp matches
+    stratumV1JobsService.newMiningJob$.subscribe();
+    await new Promise((r) => setTimeout(r, 50));
+
     jest.spyOn(client as any, 'write').mockImplementation(() => true);
     jest.spyOn(clientService, 'insert').mockResolvedValue({ id: 1 } as any);
 

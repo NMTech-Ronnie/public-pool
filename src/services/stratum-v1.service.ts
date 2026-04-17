@@ -16,6 +16,26 @@ const FLUSH_INTERVAL_MS = 10_000; // Batch flush every 10s
 const DIFFICULTY_CHECK_INTERVAL_MS = 60_000; // Check difficulty every 60s
 const STATS_LOG_INTERVAL_MS = 30_000; // Log worker stats every 30s
 
+interface IWorkerSnapshot {
+  workerId: string;
+  activeClients: number;
+  subscribedClients: number;
+  authorizedClients: number;
+  workingClients: number;
+  connections: number;
+  disconnections: number;
+  sharesAccepted: number;
+  sharesRejected: number;
+  subscriptions: number;
+  authorizations: number;
+  stratumInitialized: number;
+  socketErrors: number;
+  difficultyErrors: number;
+  flushErrors: number;
+  streamErrors: number;
+  blocksFound: number;
+}
+
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
   private readonly clients = new Set<StratumV1Client>();
@@ -81,15 +101,60 @@ export class StratumV1Service implements OnModuleInit {
 
     // 3. Worker statistics logging every 30s
     setInterval(() => {
+      let subscribedClients = 0;
+      let authorizedClients = 0;
+      let workingClients = 0;
+      for (const client of this.clients) {
+        if (client.hasSubscription()) {
+          subscribedClients++;
+        }
+        if (client.hasAuthorization()) {
+          authorizedClients++;
+        }
+        if (client.isWorking()) {
+          workingClients++;
+        }
+      }
+
       this.workerStats.activeClients = this.clients.size;
       console.log(
-        `[Worker ${this.workerId}] clients=${this.clients.size}` +
+        `[Worker ${this.workerId}] active=${this.clients.size}` +
+          ` subscribed=${subscribedClients} authorized=${authorizedClients} working=${workingClients}` +
           ` conn=+${this.workerStats.connections} disc=+${this.workerStats.disconnections}` +
+          ` sub=+${this.workerStats.subscriptions} auth=+${this.workerStats.authorizations} init=+${this.workerStats.stratumInitialized}` +
           ` accepted=+${this.workerStats.sharesAccepted} rejected=+${this.workerStats.sharesRejected}` +
           ` sockErr=+${this.workerStats.socketErrors} diffErr=+${this.workerStats.difficultyErrors}` +
           ` flushErr=+${this.workerStats.flushErrors} streamErr=+${this.workerStats.streamErrors}` +
           ` blocks=+${this.workerStats.blocksFound}`,
       );
+
+      const snapshot: IWorkerSnapshot = {
+        workerId: this.workerId,
+        activeClients: this.clients.size,
+        subscribedClients,
+        authorizedClients,
+        workingClients,
+        connections: this.workerStats.connections,
+        disconnections: this.workerStats.disconnections,
+        sharesAccepted: this.workerStats.sharesAccepted,
+        sharesRejected: this.workerStats.sharesRejected,
+        subscriptions: this.workerStats.subscriptions,
+        authorizations: this.workerStats.authorizations,
+        stratumInitialized: this.workerStats.stratumInitialized,
+        socketErrors: this.workerStats.socketErrors,
+        difficultyErrors: this.workerStats.difficultyErrors,
+        flushErrors: this.workerStats.flushErrors,
+        streamErrors: this.workerStats.streamErrors,
+        blocksFound: this.workerStats.blocksFound,
+      };
+
+      if (typeof process.send === 'function') {
+        process.send({
+          type: 'worker-stats',
+          payload: snapshot,
+        });
+      }
+
       this.workerStats.reset();
     }, STATS_LOG_INTERVAL_MS);
   }

@@ -13,6 +13,30 @@ import * as os from 'node:os';
 
 import { AppModule } from './app.module';
 
+interface IWorkerSnapshot {
+  workerId: string;
+  activeClients: number;
+  subscribedClients: number;
+  authorizedClients: number;
+  workingClients: number;
+  connections: number;
+  disconnections: number;
+  sharesAccepted: number;
+  sharesRejected: number;
+  subscriptions: number;
+  authorizations: number;
+  stratumInitialized: number;
+  socketErrors: number;
+  difficultyErrors: number;
+  flushErrors: number;
+  streamErrors: number;
+  blocksFound: number;
+}
+
+interface IWorkerSnapshotState extends IWorkerSnapshot {
+  updatedAt: number;
+}
+
 async function bootstrap() {
   if (process.env.API_PORT == null) {
     console.error(
@@ -80,13 +104,79 @@ if (numWorkers > 1 && !alreadyClustered && (cluster as any).isPrimary) {
   console.log(
     `Primary process ${process.pid} starting ${numWorkers} workers...`,
   );
+  const workerSnapshots = new Map<number, IWorkerSnapshotState>();
+
+  const aggregateTimer = setInterval(() => {
+    if (workerSnapshots.size === 0) {
+      return;
+    }
+
+    let activeClients = 0;
+    let subscribedClients = 0;
+    let authorizedClients = 0;
+    let workingClients = 0;
+    let connections = 0;
+    let disconnections = 0;
+    let subscriptions = 0;
+    let authorizations = 0;
+    let stratumInitialized = 0;
+    let sharesAccepted = 0;
+    let sharesRejected = 0;
+    let socketErrors = 0;
+    let difficultyErrors = 0;
+    let flushErrors = 0;
+    let streamErrors = 0;
+    let blocksFound = 0;
+
+    for (const snapshot of workerSnapshots.values()) {
+      activeClients += snapshot.activeClients;
+      subscribedClients += snapshot.subscribedClients;
+      authorizedClients += snapshot.authorizedClients;
+      workingClients += snapshot.workingClients;
+      connections += snapshot.connections;
+      disconnections += snapshot.disconnections;
+      subscriptions += snapshot.subscriptions;
+      authorizations += snapshot.authorizations;
+      stratumInitialized += snapshot.stratumInitialized;
+      sharesAccepted += snapshot.sharesAccepted;
+      sharesRejected += snapshot.sharesRejected;
+      socketErrors += snapshot.socketErrors;
+      difficultyErrors += snapshot.difficultyErrors;
+      flushErrors += snapshot.flushErrors;
+      streamErrors += snapshot.streamErrors;
+      blocksFound += snapshot.blocksFound;
+    }
+
+    console.log(
+      `[Primary] workers=${workerSnapshots.size}/${numWorkers}` +
+        ` active=${activeClients} subscribed=${subscribedClients} authorized=${authorizedClients} working=${workingClients}` +
+        ` conn=+${connections} disc=+${disconnections}` +
+        ` sub=+${subscriptions} auth=+${authorizations} init=+${stratumInitialized}` +
+        ` accepted=+${sharesAccepted} rejected=+${sharesRejected}` +
+        ` sockErr=+${socketErrors} diffErr=+${difficultyErrors} flushErr=+${flushErrors} streamErr=+${streamErrors}` +
+        ` blocks=+${blocksFound}`,
+    );
+  }, 30000);
+  aggregateTimer.unref();
+
   for (let i = 0; i < numWorkers; i++) {
     (cluster as any).fork({ NODE_APP_INSTANCE: i.toString() });
   }
+  (cluster as any).on('message', (worker, message) => {
+    if (message?.type !== 'worker-stats' || message.payload == null) {
+      return;
+    }
+
+    workerSnapshots.set(worker.id, {
+      ...(message.payload as IWorkerSnapshot),
+      updatedAt: Date.now(),
+    });
+  });
   (cluster as any).on('exit', (worker, code, signal) => {
     console.log(
       `Worker ${worker.process.pid} died (code: ${code}, signal: ${signal}). Restarting...`,
     );
+    workerSnapshots.delete(worker.id);
     const instanceId = worker.process.env?.NODE_APP_INSTANCE || '0';
     (cluster as any).fork({ NODE_APP_INSTANCE: instanceId });
   });

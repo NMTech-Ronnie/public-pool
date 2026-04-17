@@ -45,6 +45,9 @@ export class WorkerStats {
   public disconnections = 0;
   public sharesAccepted = 0;
   public sharesRejected = 0;
+  public subscriptions = 0;
+  public authorizations = 0;
+  public stratumInitialized = 0;
   public socketErrors = 0;
   public difficultyErrors = 0;
   public flushErrors = 0;
@@ -57,6 +60,9 @@ export class WorkerStats {
     this.disconnections = 0;
     this.sharesAccepted = 0;
     this.sharesRejected = 0;
+    this.subscriptions = 0;
+    this.authorizations = 0;
+    this.stratumInitialized = 0;
     this.socketErrors = 0;
     this.difficultyErrors = 0;
     this.flushErrors = 0;
@@ -189,6 +195,7 @@ export class StratumV1Client {
           }
 
           this.clientSubscription = subscriptionMessage;
+          this.workerStats.subscriptions++;
           const success = await this.write(
             JSON.stringify(
               this.clientSubscription.response(this.extraNonceAndSessionId),
@@ -268,6 +275,7 @@ export class StratumV1Client {
 
         if (errors.length === 0) {
           this.clientAuthorization = authorizationMessage;
+          this.workerStats.authorizations++;
           const success = await this.write(
             JSON.stringify(this.clientAuthorization.response()) + '\n',
           );
@@ -397,6 +405,7 @@ export class StratumV1Client {
 
   private async initStratum() {
     this.stratumInitialized = true;
+    this.workerStats.stratumInitialized++;
 
     switch (this.clientSubscription.userAgent) {
       case 'cpuminer': {
@@ -684,6 +693,22 @@ export class StratumV1Client {
       // Use cached job to avoid expensive MiningJob construction
       await this.resendCurrentJobWithClear();
     }
+  }
+
+  public hasSubscription(): boolean {
+    return this.clientSubscription != null;
+  }
+
+  public hasAuthorization(): boolean {
+    return this.clientAuthorization != null;
+  }
+
+  public isWorking(): boolean {
+    return (
+      this.stratumInitialized &&
+      this.clientSubscription != null &&
+      this.clientAuthorization != null
+    );
   }
 
   private async resendCurrentJobWithClear() {

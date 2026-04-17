@@ -209,7 +209,6 @@ export class StratumV1Service implements OnModuleInit {
       });
     });
 
-    server.maxConnections = 0; // unlimited
     server.listen(process.env.STRATUM_PORT, () => {
       console.log(
         `[Worker ${this.workerId}] Stratum server is listening on port ${process.env.STRATUM_PORT}`,

@@ -45,17 +45,29 @@ export class AppService implements OnModuleInit {
       process.env.NODE_APP_INSTANCE == '0'
     ) {
       setInterval(async () => {
-        await this.deleteOldStatistics();
+        try {
+          await this.deleteOldStatistics();
+        } catch (e: any) {
+          console.error('deleteOldStatistics error:', e?.message);
+        }
       }, 1000 * 60 * 60);
 
       setInterval(async () => {
         console.log('Killing dead clients');
-        await this.clientService.killDeadClients();
+        try {
+          await this.clientService.killDeadClients();
+        } catch (e: any) {
+          console.error('killDeadClients error:', e?.message);
+        }
       }, 1000 * 60 * 5);
 
       setInterval(async () => {
         console.log('Deleting Old Blocks');
-        await this.rpcBlockService.deleteOldBlocks();
+        try {
+          await this.rpcBlockService.deleteOldBlocks();
+        } catch (e: any) {
+          console.error('deleteOldBlocks error:', e?.message);
+        }
       }, 1000 * 60 * 60 * 24);
     }
   }

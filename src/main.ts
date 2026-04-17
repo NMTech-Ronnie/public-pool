@@ -1,3 +1,8 @@
+// Increase libuv thread pool BEFORE any I/O modules load.
+// Default is 4 threads — with 4 workers each doing SQLite busy-waits,
+// all threads get exhausted, freezing the event loop.
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
+
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {

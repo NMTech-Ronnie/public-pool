@@ -13,6 +13,7 @@ import { IJobTemplate, StratumV1JobsService } from './stratum-v1-jobs.service';
 import { ExternalSharesService } from './external-shares.service';
 
 const FLUSH_INTERVAL_MS = 10_000; // Batch flush every 10s
+const INSERT_CLIENTS_INTERVAL_MS = 5_000; // Insert new clients every 5s
 const DIFFICULTY_CHECK_INTERVAL_MS = 60_000; // Check difficulty every 60s
 const STATS_LOG_INTERVAL_MS = 30_000; // Log worker stats every 30s
 const MAX_CLIENTS_PER_WORKER = 10_000;
@@ -72,6 +73,11 @@ export class StratumV1Service implements OnModuleInit {
    * Single set of timers per worker process, replacing N per-client setIntervals.
    */
   private startCentralizedTimers() {
+    // Stagger all DB-writing timers per worker to reduce SQLite write lock contention.
+    // Workers 0-3 offset by 0, 2.5s, 5s, 7.5s within each interval window.
+    const workerIndex = parseInt(this.workerId) || 0;
+    const stagger = workerIndex * 2500;
+
     // 1. Difficulty check: iterate all clients every 60s
     setInterval(() => {
       for (const client of this.clients) {
@@ -83,25 +89,38 @@ export class StratumV1Service implements OnModuleInit {
       }
     }, DIFFICULTY_CHECK_INTERVAL_MS);
 
-    // 2. Batch DB flush: flush all queued writes every 10s
-    setInterval(async () => {
-      try {
-        // First, flush each client's in-memory statistics to the queue
-        for (const client of this.clients) {
-          try {
-            client.flushStatistics();
-          } catch (_) {
-            /* client may have been destroyed */
+    // 2. Batch DB flush: flush all queued writes every 10s (staggered per worker)
+    setTimeout(() => {
+      setInterval(async () => {
+        try {
+          // First, flush each client's in-memory statistics to the queue
+          for (const client of this.clients) {
+            try {
+              client.flushStatistics();
+            } catch (_) {
+              /* client may have been destroyed */
+            }
           }
+          // Then batch-write all queued data to SQLite
+          await this.clientStatisticsService.flushWrites();
+          await this.clientService.flushWrites();
+        } catch (e: any) {
+          this.workerStats.flushErrors++;
+          console.error(`[Worker ${this.workerId}] Flush error:`, e?.message);
         }
-        // Then batch-write all queued data to SQLite
-        await this.clientStatisticsService.flushWrites();
-        await this.clientService.flushWrites();
-      } catch (e) {
-        this.workerStats.flushErrors++;
-        console.error(`[Worker ${this.workerId}] Flush error:`, e.message);
-      }
-    }, FLUSH_INTERVAL_MS);
+      }, FLUSH_INTERVAL_MS);
+    }, stagger);
+
+    // 2b. Insert new client records every 5s (staggered, replaces @Interval in client.service)
+    setTimeout(() => {
+      setInterval(async () => {
+        try {
+          await this.clientService.insertClients();
+        } catch (e: any) {
+          console.error(`[Worker ${this.workerId}] insertClients error:`, e?.message);
+        }
+      }, INSERT_CLIENTS_INTERVAL_MS);
+    }, stagger);
 
     // 3. Worker statistics logging every 30s + idle connection cleanup
     setInterval(() => {

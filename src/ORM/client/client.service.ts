@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
 import { ObjectLiteral, Repository } from 'typeorm';
@@ -34,20 +33,33 @@ export class ClientService {
     private clientRepository: Repository<ClientEntity>,
   ) {}
 
-  @Interval(1000 * 5)
+  // Called from stratum-v1.service centralized timer (staggered per worker)
   public async insertClients() {
     const queueCopy = [...this.insertQueue];
     this.insertQueue = [];
 
     if (queueCopy.length === 0) return;
 
-    const results = await this.clientRepository.insert(
-      queueCopy.map((c) => c.partialClient),
-    );
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const results = await this.clientRepository.insert(
+          queueCopy.map((c) => c.partialClient),
+        );
 
-    queueCopy.forEach((c, index) => {
-      c.result.next(results.generatedMaps[index]);
-    });
+        queueCopy.forEach((c, index) => {
+          c.result.next(results.generatedMaps[index]);
+        });
+        return;
+      } catch (e: any) {
+        if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        // On final failure, reject all pending inserts so callers don't hang
+        queueCopy.forEach((c) => c.result.error(e));
+        throw e;
+      }
+    }
   }
 
   public async flushWrites(): Promise<{
@@ -63,71 +75,80 @@ export class ClientService {
     let heartbeatCount = 0;
     let bestDiffCount = 0;
 
-    // Batch heartbeats in a single transaction
+    // Batch heartbeats in small transaction chunks (50 at a time)
+    // to reduce write lock hold time and avoid blocking other workers
     if (heartbeats.length > 0) {
-      try {
-        await this.clientRepository.manager.transaction(async (manager) => {
-          for (const hb of heartbeats) {
-            await manager.update(
-              ClientEntity,
-              {
-                address: hb.address,
-                clientName: hb.clientName,
-                sessionId: hb.sessionId,
-              },
-              {
-                hashRate: hb.hashRate,
-                deletedAt: null,
-                updatedAt: hb.updatedAt,
-              },
-            );
+      const BATCH = 50;
+      for (let i = 0; i < heartbeats.length; i += BATCH) {
+        const batch = heartbeats.slice(i, i + BATCH);
+        try {
+          await this.clientRepository.manager.transaction(async (manager) => {
+            for (const hb of batch) {
+              await manager.update(
+                ClientEntity,
+                {
+                  address: hb.address,
+                  clientName: hb.clientName,
+                  sessionId: hb.sessionId,
+                },
+                {
+                  hashRate: hb.hashRate,
+                  deletedAt: null,
+                  updatedAt: hb.updatedAt,
+                },
+              );
+            }
+          });
+          heartbeatCount += batch.length;
+        } catch (e) {
+          // Fallback: individual writes for this batch
+          for (const hb of batch) {
+            try {
+              await this.clientRepository.update(
+                {
+                  address: hb.address,
+                  clientName: hb.clientName,
+                  sessionId: hb.sessionId,
+                },
+                {
+                  hashRate: hb.hashRate,
+                  deletedAt: null,
+                  updatedAt: hb.updatedAt,
+                },
+              );
+              heartbeatCount++;
+            } catch (e2) {}
           }
-        });
-        heartbeatCount = heartbeats.length;
-      } catch (e) {
-        // Fallback: individual writes
-        for (const hb of heartbeats) {
-          try {
-            await this.clientRepository.update(
-              {
-                address: hb.address,
-                clientName: hb.clientName,
-                sessionId: hb.sessionId,
-              },
-              {
-                hashRate: hb.hashRate,
-                deletedAt: null,
-                updatedAt: hb.updatedAt,
-              },
-            );
-            heartbeatCount++;
-          } catch (e2) {}
         }
       }
     }
 
-    // Batch bestDifficulty updates in a single transaction
+    // Batch bestDifficulty updates in small chunks
     if (bestDiffs.length > 0) {
-      try {
-        await this.clientRepository.manager.transaction(async (manager) => {
-          for (const bd of bestDiffs) {
-            await manager.update(
-              ClientEntity,
-              { sessionId: bd.sessionId },
-              { bestDifficulty: bd.bestDifficulty },
-            );
+      const BATCH = 50;
+      for (let i = 0; i < bestDiffs.length; i += BATCH) {
+        const batch = bestDiffs.slice(i, i + BATCH);
+        try {
+          await this.clientRepository.manager.transaction(async (manager) => {
+            for (const bd of batch) {
+              await manager.update(
+                ClientEntity,
+                { sessionId: bd.sessionId },
+                { bestDifficulty: bd.bestDifficulty },
+              );
+            }
+          });
+          bestDiffCount += batch.length;
+        } catch (e) {
+          for (const bd of batch) {
+            try {
+              await this.clientRepository.update(
+                { sessionId: bd.sessionId },
+                { bestDifficulty: bd.bestDifficulty },
+              );
+              bestDiffCount++;
+            } catch (e2) {}
           }
-        });
-        bestDiffCount = bestDiffs.length;
-      } catch (e) {
-        for (const bd of bestDiffs) {
-          try {
-            await this.clientRepository.update(
-              { sessionId: bd.sessionId },
-              { bestDifficulty: bd.bestDifficulty },
-            );
-            bestDiffCount++;
-          } catch (e2) {}
         }
       }
     }

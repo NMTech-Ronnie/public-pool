@@ -34,18 +34,27 @@ export class ClientStatisticsService {
     let updateCount = 0;
 
     if (inserts.length > 0) {
-      try {
-        await this.clientStatisticsRepository.insert(inserts);
-        insertCount = inserts.length;
-      } catch (e) {
-        // Fallback: insert one by one to handle duplicates
-        for (const item of inserts) {
-          try {
-            await this.clientStatisticsRepository.insert(item);
-            insertCount++;
-          } catch (e2) {
-            // Duplicate, convert to update
-            updates.push(item);
+      // Retry bulk insert on SQLITE_BUSY
+      let inserted = false;
+      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+        try {
+          await this.clientStatisticsRepository.insert(inserts);
+          insertCount = inserts.length;
+          inserted = true;
+        } catch (e: any) {
+          if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
+            await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+            continue;
+          }
+          // Fallback: insert one by one to handle duplicates
+          for (const item of inserts) {
+            try {
+              await this.clientStatisticsRepository.insert(item);
+              insertCount++;
+            } catch (e2) {
+              // Duplicate, convert to update
+              updates.push(item);
+            }
           }
         }
       }

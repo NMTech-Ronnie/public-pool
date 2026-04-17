@@ -10,22 +10,43 @@ export class RpcBlockService {
     @InjectRepository(RpcBlockEntity)
     private rpcBlockRepository: Repository<RpcBlockEntity>,
   ) {}
+
+  private async retryOnBusy<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (e: any) {
+        if (attempt < maxAttempts - 1 && e?.message?.includes('SQLITE_BUSY')) {
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+
   public getBlock(blockHeight: number) {
-    return this.rpcBlockRepository.findOne({
-      where: { blockHeight },
-    });
+    return this.retryOnBusy(() =>
+      this.rpcBlockRepository.findOne({
+        where: { blockHeight },
+      }),
+    );
   }
 
   public lockBlock(blockHeight: number, process: string) {
-    return this.rpcBlockRepository.save({
-      blockHeight,
-      data: null,
-      lockedBy: process,
-    });
+    return this.retryOnBusy(() =>
+      this.rpcBlockRepository.save({
+        blockHeight,
+        data: null,
+        lockedBy: process,
+      }),
+    );
   }
 
   public saveBlock(blockHeight: number, data: string) {
-    return this.rpcBlockRepository.update(blockHeight, { data });
+    return this.retryOnBusy(() =>
+      this.rpcBlockRepository.update(blockHeight, { data }),
+    );
   }
 
   public async deleteOldBlocks() {

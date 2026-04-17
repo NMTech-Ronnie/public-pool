@@ -148,6 +148,9 @@ export class StratumV1Client {
 
   public async destroy() {
     if (this.extraNonceAndSessionId) {
+      // Remove from write queues FIRST to prevent stale heartbeat from
+      // resurrecting the record via `deletedAt = NULL` after softDelete.
+      this.clientService.removeFromQueues(this.extraNonceAndSessionId);
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           await this.clientService.delete(this.extraNonceAndSessionId);
@@ -497,6 +500,10 @@ export class StratumV1Client {
               startTime: new Date(),
               bestDifficulty: 0,
             });
+            // Initialize updatedAt so the heartbeat gate (>60s check) works.
+            // Without this, updatedAt is undefined from insert's generatedMaps,
+            // causing the first heartbeat to fire immediately with hashRate=0.
+            this.entity.updatedAt = new Date();
           } catch (e) {
             reject(e);
           }

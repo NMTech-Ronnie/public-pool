@@ -142,6 +142,16 @@ export class ClientService {
     });
   }
 
+  /**
+   * Remove a session from all pending write queues.
+   * Must be called BEFORE softDelete to prevent flushWrites from resurrecting
+   * a destroyed session via the `deletedAt = NULL` in the heartbeat UPDATE.
+   */
+  public removeFromQueues(sessionId: string) {
+    this.heartbeatQueue.delete(sessionId);
+    this.bestDifficultyQueue.delete(sessionId);
+  }
+
   public queueBestDifficulty(
     address: string,
     clientName: string,

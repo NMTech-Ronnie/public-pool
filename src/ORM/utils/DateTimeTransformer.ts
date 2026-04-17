@@ -2,13 +2,14 @@ import { ValueTransformer } from 'typeorm';
 
 export class DateTimeTransformer implements ValueTransformer {
   to(value: Date): any {
-    // Convert the local time to UTC before saving to the database
-    const utcTime = value?.toLocaleString();
-    return utcTime;
+    // Store as ISO 8601 format that SQLite DATETIME() can parse/compare correctly.
+    // toLocaleString() produces locale-dependent strings (e.g. "4/17/2026, 5:10:20 AM")
+    // which SQLite's DATETIME() cannot parse, breaking time comparisons in killDeadClients.
+    return value?.toISOString?.() ?? value;
   }
 
   from(value: any): Date {
-    // Convert the UTC time from the database to the local time zone
-    return value;
+    // Convert the stored ISO string back to a Date object
+    return value ? new Date(value) : value;
   }
 }

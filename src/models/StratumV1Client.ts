@@ -326,7 +326,9 @@ export class StratumV1Client {
 
         if (errors.length === 0) {
           this.clientSuggestedDifficulty = suggestDifficultyMessage;
-          this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
+          const suggested = suggestDifficultyMessage.suggestedDifficulty;
+          this.sessionDifficulty = Math.max(suggested, 0.005);
+
           const success = await this.write(
             JSON.stringify(
               this.clientSuggestedDifficulty.response(this.sessionDifficulty),

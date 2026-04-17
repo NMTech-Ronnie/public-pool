@@ -93,7 +93,7 @@ export class ClientService {
 
     if (heartbeats.length > 0) {
       try {
-        const now = new Date().toLocaleString();
+        const now = new Date().toISOString();
         await this.clientRepository.manager.transaction(async (manager) => {
           for (const hb of heartbeats) {
             await manager.query(
@@ -167,8 +167,8 @@ export class ClientService {
     return await this.clientRepository
       .createQueryBuilder()
       .update(ClientEntity)
-      .set({ deletedAt: () => "DATETIME('now')" })
-      .where('deletedAt IS NULL AND updatedAt < DATETIME(:fiveMinutes)', {
+      .set({ deletedAt: () => "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" })
+      .where('deletedAt IS NULL AND updatedAt < :fiveMinutes', {
         fiveMinutes,
       })
       .execute();
@@ -280,6 +280,7 @@ export class ClientService {
       .addSelect('COUNT(client.userAgent)', 'count')
       .addSelect('MAX(client.bestDifficulty)', 'bestDifficulty')
       .addSelect('SUM(client.hashRate)', 'totalHashRate')
+      .where('client.deletedAt IS NULL')
       .groupBy('client.userAgent')
       .orderBy('count', 'DESC')
       .getRawMany();

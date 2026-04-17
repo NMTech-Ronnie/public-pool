@@ -67,7 +67,7 @@ export class ClientStatisticsService {
     // Wrap all updates in a single raw SQL transaction to minimize lock hold time
     if (updates.length > 0) {
       try {
-        const now = new Date().toLocaleString();
+        const now = new Date().toISOString();
         await this.clientStatisticsRepository.manager.transaction(
           async (manager) => {
             for (const stat of updates) {

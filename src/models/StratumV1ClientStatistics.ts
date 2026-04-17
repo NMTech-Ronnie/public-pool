@@ -75,6 +75,13 @@ export class StratumV1ClientStatistics {
       this.acceptedCount = 1;
       this.currentSlotInserted = false;
       this.dirty = true;
+
+      // Recompute hashRate across the slot boundary so it doesn't go stale
+      const time = this.currentTimeSlotTime.getTime() - this.previousTimeSlotTime.getTime();
+      if (time > 0) {
+        this.hashRate =
+          ((this.previousShares + this.shares) * 4294967296) / (time / 1000);
+      }
     } else {
       // Same time slot
       this.shares += targetDifficulty;

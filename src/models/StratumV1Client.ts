@@ -619,6 +619,10 @@ export class StratumV1Client {
         this.entity.updatedAt == null ||
         now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60
       ) {
+        // Use statistics.hashRate directly — it was just recomputed by addShares above.
+        // this.hashRate is only refreshed in sendNewMiningJob (~60s interval) and
+        // will be 0 for newly connected clients that haven't received a second job yet.
+        this.hashRate = this.statistics.hashRate;
         this.clientService.queueHeartbeat(
           this.entity.address,
           this.entity.clientName,

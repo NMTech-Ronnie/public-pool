@@ -1,0 +1,175 @@
+####################################################################
+# Production deployment for 8-core / 16 GB server
+#
+# Resource budget (approximate):
+#   bitcoind    : 2 cores, ~4 GB RAM (UTXO set + dbcache)
+#   public-pool : 4 workers (CLUSTER_WORKERS=4), ~8 GB RAM cap
+#   traefik     : 0.5 core, 128 MB
+#   public-pool-ui: 0.5 core, 512 MB
+#   watchtower  : 0.25 core, 128 MB
+#   OS / kernel : ~1 GB
+#   Total       : ~14 GB (fits 16 GB with ~2 GB headroom)
+#   CPU         : soft overcommit OK; pool 6 + bitcoind 2 share
+#                 8 physical cores via CFS scheduler.
+#
+# Key points:
+#   - CLUSTER_WORKERS=4 → 1 primary + 4 child processes.
+#   - mem_limit=8g hard-caps the container.
+#   - NODE_OPTIONS --max-old-space-size=1024 per worker ×4 = 4 GB
+#     heap; leaves ~4 GB for native, mmap, shm, buffers.
+#   - SQLite PRAGMA cache/mmap are auto-scaled in app.service.ts
+#     by worker count (total ~800 MB cache + ~4 GB mmap).
+#   - shm_size=1gb ensures SQLite WAL shared memory never hits
+#     the tmpfs ceiling (actual usage typically < 10 MB).
+#   - stop_grace_period=30s allows the 10s flush timer to complete
+#     at least 2 cycles before SIGKILL.
+####################################################################
+
+version: '3.8'
+services:
+  traefik:
+    image: "traefik:latest"
+    container_name: "traefik"
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+    command:
+      - "--accesslog=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.selfhostedservices.acme.tlschallenge=true"
+      - "--certificatesresolvers.selfhostedservices.acme.email=912097713@qq.com"
+      - "--certificatesresolvers.selfhostedservices.acme.storage=/letsencrypt/acme.json"
+      - "--serversTransport.insecureSkipVerify=true"
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+    volumes:
+      - "lets-encrypt-data:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  bitcoind:
+    image: ghcr.io/sethforprivacy/bitcoind:latest
+    restart: unless-stopped
+    container_name: bitcoind
+    cpus: 2.0
+    mem_limit: 4g
+    mem_reservation: 2g
+    volumes:
+      - bitcoind-data:/bitcoin/.bitcoin
+      - ./bitcoin.conf:/bitcoin/.bitcoin/bitcoin.conf
+    ports:
+      - 8333:8333
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+
+  public-pool:
+    container_name: public-pool
+    build:
+      context: ./public-pool
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    cpus: 6.0
+    mem_limit: 8g
+    mem_reservation: 2g
+    # SQLite WAL shared memory (actual usage < 10 MB; 1 GB ceiling is safe headroom)
+    shm_size: '1gb'
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    ports:
+      - "0.0.0.0:3333:3333/tcp"
+      - "0.0.0.0:3334:3334/tcp"
+    volumes:
+      - "public-pool-db:/public-pool/DB"
+      - "./pool.env:/public-pool/.env:ro"
+    environment:
+      - NODE_ENV=production
+      # 4 workers = 1 primary + 4 child processes.
+      # Each worker: 1024 MB heap + ~300 MB native/mmap ≈ 1.3 GB.
+      # Total ≈ 5.2 GB + mmap/cache ≈ fits inside 8G mem_limit.
+      - CLUSTER_WORKERS=4
+      # Cap V8 heap per worker to prevent memory creep.
+      # 1024 MB × 4 workers = 4 GB heap; leaves ~4 GB for native/mmap/shm/buffers.
+      - NODE_OPTIONS=--max-old-space-size=1024
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 8G
+        reservations:
+          cpus: '3.0'
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const h=require('http');h.get('http://127.0.0.1:3334/api',r=>{process.exit(r.statusCode<500?0:1)}).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.public-pool-api.rule=Host(`solobtc.nmminer.com`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.public-pool-api.tls.certresolver=selfhostedservices"
+      - "traefik.http.routers.public-pool-api.entrypoints=websecure"
+      - "traefik.http.services.public-pool-api.loadbalancer.server.port=3334"
+
+  public-pool-ui:
+    container_name: public-pool-ui
+    build: ./public-pool-ui
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 512m
+    environment:
+      - DOMAIN=solobtc.nmminer.com
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.public-pool-ui.rule=Host(`solobtc.nmminer.com`)"
+      - "traefik.http.routers.public-pool-ui.tls.certresolver=selfhostedservices"
+      - "traefik.http.routers.public-pool-ui.entrypoints=websecure"
+      - "traefik.http.services.public-pool-ui.loadbalancer.server.port=80"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 128m
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+volumes:
+    lets-encrypt-data:
+    bitcoind-data:
+    public-pool-db:

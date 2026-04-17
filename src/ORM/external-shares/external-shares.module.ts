@@ -6,8 +6,8 @@ import { ExternalSharesService } from './external-shares.service';
 
 @Global()
 @Module({
-    imports: [TypeOrmModule.forFeature([ExternalSharesEntity])],
-    providers: [ExternalSharesService],
-    exports: [TypeOrmModule, ExternalSharesService],
+  imports: [TypeOrmModule.forFeature([ExternalSharesEntity])],
+  providers: [ExternalSharesService],
+  exports: [TypeOrmModule, ExternalSharesService],
 })
-export class ExternalSharesModule { } 
+export class ExternalSharesModule {}

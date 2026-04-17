@@ -153,25 +153,30 @@ export class StratumV1ClientStatistics {
   }
 
   private nearestPowerOfTwo(val): number {
-    if (val === 0) {
+    if (val === 0 || !Number.isFinite(val)) {
       return null;
     }
     if (val < MIN_DIFF) {
       return MIN_DIFF;
     }
-    let x = val | (val >> 1);
+    // For fractional values, scale up iteratively then scale back down
+    let scale = 1;
+    let v = val;
+    while (v < 1 && scale < 1e15) {
+      v *= 100;
+      scale *= 100;
+    }
+    let x = v | (v >> 1);
     x = x | (x >> 2);
     x = x | (x >> 4);
     x = x | (x >> 8);
     x = x | (x >> 16);
     x = x | (x >> 32);
     const res = x - (x >> 1);
-    if (res == 0 && val * 100 < MIN_DIFF) {
+    if (res == 0) {
       return MIN_DIFF;
     }
-    if (res == 0) {
-      return this.nearestPowerOfTwo(val * 100) / 100;
-    }
-    return res;
+    const result = res / scale;
+    return result < MIN_DIFF ? MIN_DIFF : result;
   }
 }

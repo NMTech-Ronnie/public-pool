@@ -184,5 +184,12 @@ if (numWorkers > 1 && !alreadyClustered && (cluster as any).isPrimary) {
   if (!process.env.NODE_APP_INSTANCE) {
     process.env.NODE_APP_INSTANCE = '0';
   }
+  // Prevent uncaught errors from crashing worker processes
+  process.on('uncaughtException', (err) => {
+    console.error(`[Worker ${process.env.NODE_APP_INSTANCE}] Uncaught exception:`, err.message);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[Worker ${process.env.NODE_APP_INSTANCE}] Unhandled rejection:`, reason);
+  });
   bootstrap();
 }

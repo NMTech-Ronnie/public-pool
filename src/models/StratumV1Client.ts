@@ -669,7 +669,7 @@ export class StratumV1Client {
   }
 
   public async checkDifficulty() {
-    if (this.statistics == null) {
+    if (this.statistics == null || this.clientAuthorization == null) {
       return;
     }
     const targetDiff = this.statistics.getSuggestedDifficulty(

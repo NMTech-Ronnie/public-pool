@@ -16,6 +16,9 @@ export class BitcoinRpcService implements OnModuleInit {
   private _newBlock$: BehaviorSubject<IMiningInfo> = new BehaviorSubject(
     undefined,
   );
+  // Cancellation token for waitForBlock — prevents leaked promise loops
+  // when switchMap moves on to a new block/interval.
+  private waitForBlockAborted = false;
   public newBlock$ = this._newBlock$.pipe(
     filter((block) => block != null),
     shareReplay({ refCount: true, bufferSize: 1 }),
@@ -92,19 +95,32 @@ export class BitcoinRpcService implements OnModuleInit {
   }
 
   private async waitForBlock(blockHeight: number): Promise<IBlockTemplate> {
-    while (true) {
-      await new Promise((r) => setTimeout(r, 100));
+    const MAX_WAIT_MS = 30_000; // 30s timeout
+    const POLL_INTERVAL_MS = 1000; // 1s between polls (was 100ms)
+    const start = Date.now();
+
+    while (!this.waitForBlockAborted) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 
       const block = await this.rpcBlockService.getBlock(blockHeight);
       if (block != null && block.data != null) {
-        console.log(`promise loop resolved, block height ${blockHeight}`);
-        return Promise.resolve(JSON.parse(block.data));
+        console.log(`waitForBlock resolved, block height ${blockHeight}`);
+        return JSON.parse(block.data);
       }
-      console.log(`promise loop, block height ${blockHeight}`);
+
+      if (Date.now() - start > MAX_WAIT_MS) {
+        throw new Error(`waitForBlock timed out after ${MAX_WAIT_MS}ms for height ${blockHeight}`);
+      }
     }
+    throw new Error(`waitForBlock aborted for height ${blockHeight}`);
   }
 
   public async getBlockTemplate(blockHeight: number): Promise<IBlockTemplate> {
+    // Abort any lingering waitForBlock loops from previous calls
+    this.waitForBlockAborted = true;
+    await new Promise((r) => setImmediate(r));
+    this.waitForBlockAborted = false;
+
     let result: IBlockTemplate;
     try {
       const block = await this.rpcBlockService.getBlock(blockHeight);
@@ -114,7 +130,7 @@ export class BitcoinRpcService implements OnModuleInit {
       if (completeBlock && block.lockedBy == process.env.NODE_APP_INSTANCE) {
         result = await this.loadBlockTemplate(blockHeight);
       } else if (completeBlock) {
-        return Promise.resolve(JSON.parse(block.data));
+        return JSON.parse(block.data);
       } else if (!completeBlock) {
         if (process.env.NODE_APP_INSTANCE != null) {
           // There is a unique constraint on the block height so if another process tries to lock, it'll throw
@@ -123,11 +139,15 @@ export class BitcoinRpcService implements OnModuleInit {
               blockHeight,
               process.env.NODE_APP_INSTANCE,
             );
+            // Lock acquired — this worker loads the template
+            result = await this.loadBlockTemplate(blockHeight);
           } catch (e) {
+            // Another worker holds the lock — wait for it to save the template
             result = await this.waitForBlock(blockHeight);
           }
+        } else {
+          result = await this.loadBlockTemplate(blockHeight);
         }
-        result = await this.loadBlockTemplate(blockHeight);
       } else {
         //wait for block
         result = await this.waitForBlock(blockHeight);

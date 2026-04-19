@@ -97,7 +97,7 @@ export class ClientService {
         await this.clientRepository.manager.transaction(async (manager) => {
           for (const hb of heartbeats) {
             await manager.query(
-              'UPDATE client_entity SET hashRate = ?, deletedAt = NULL, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ?',
+              'UPDATE client_entity SET hashRate = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND deletedAt IS NULL',
               [hb.hashRate, now, hb.address, hb.clientName, hb.sessionId],
             );
           }

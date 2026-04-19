@@ -8,6 +8,7 @@ import { BlocksService } from '../ORM/blocks/blocks.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
+import { LeaderElectionService } from './leader-election.service';
 import { NotificationService } from './notification.service';
 import { StratumV1JobsService } from './stratum-v1-jobs.service';
 import { ExternalSharesService } from './external-shares.service';
@@ -25,14 +26,15 @@ export class StratumV1Service implements OnModuleInit {
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly addressSettingsService: AddressSettingsService,
-    private readonly externalSharesService: ExternalSharesService
+    private readonly externalSharesService: ExternalSharesService,
+    private readonly leaderElectionService: LeaderElectionService,
   ) {
 
   }
 
   async onModuleInit(): Promise<void> {
 
-      if (process.env.NODE_APP_INSTANCE == '0') {
+      if (this.leaderElectionService.getIsLeader()) {
         await this.clientService.deleteAll();
       }
       setTimeout(() => {

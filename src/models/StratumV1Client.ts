@@ -426,12 +426,12 @@ export class StratumV1Client {
         const job = new MiningJob(
             this.configService,
             network,
-            this.stratumV1JobsService.getNextId(),
+            await this.stratumV1JobsService.getNextId(),
             payoutInformation,
             jobTemplate
         );
 
-        this.stratumV1JobsService.addJob(job);
+        await this.stratumV1JobsService.addJob(job);
 
 
         const success = await this.write(job.response(jobTemplate));

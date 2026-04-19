@@ -40,8 +40,8 @@ export class ClientService {
         return await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ deletedAt: () => "DATETIME('now')" })
-            .where("deletedAt IS NULL AND updatedAt < DATETIME(:fiveMinutes)", { fiveMinutes })
+            .set({ deletedAt: () => 'NOW()' })
+            .where('"deletedAt" IS NULL AND "updatedAt" < :fiveMinutes::timestamptz', { fiveMinutes })
             .execute();
     }
 

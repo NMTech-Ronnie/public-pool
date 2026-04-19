@@ -5,6 +5,7 @@ import { Block } from 'bitcoinjs-lib';
 import * as TelegramBot from 'node-telegram-bot-api';
 
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
+import { LeaderElectionService } from './leader-election.service';
 
 
 @Injectable()
@@ -14,8 +15,12 @@ export class TelegramService implements OnModuleInit {
 
     constructor(
         private readonly configService: ConfigService,
-        private readonly telegramSubscriptionsService: TelegramSubscriptionsService
+        private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
+        private readonly leaderElectionService: LeaderElectionService,
     ) {
+        if (!this.leaderElectionService.getIsLeader()) {
+            return;
+        }
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
         if (token == null || token.length < 1) {
             return;

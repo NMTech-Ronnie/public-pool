@@ -33,30 +33,39 @@ async function bootstrap() {
     new ValidationPipe({
       transform: true,
       whitelist: true,
-      //forbidNonWhitelisted: true,
-      //forbidUnknownValues: true
     }),
   );
 
-  process.on('SIGINT', () => {
-    console.log(`Stopping services`);
-    process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    console.log(`Stopping services`);
-    process.exit(0);
-  });
-
+  app.enableShutdownHooks();
   app.enableCors();
   useContainer(app.select(AppModule), { fallbackOnErrors: true });
 
   //Taproot
   bitcoinjs.initEccLib(ecc);
 
+  // Create PostgreSQL sequences for global unique ID generation
+  const dataSource = app.get('DataSource');
+  if (dataSource) {
+    try {
+      await dataSource.query("CREATE SEQUENCE IF NOT EXISTS job_id_seq START 1");
+      await dataSource.query("CREATE SEQUENCE IF NOT EXISTS job_template_id_seq START 1");
+    } catch (e) {
+      console.error('Failed to create sequences:', e.message);
+    }
+  }
+
   await app.listen(process.env.API_PORT, '0.0.0.0', (err, address) => {
     console.log(`API listening on ${address}`);
   });
+
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`${signal} received, shutting down gracefully...`);
+    await app.close();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 }
 

@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { RPCClient } from 'rpc-bitcoin';
 import { BehaviorSubject, filter, shareReplay } from 'rxjs';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
+import { ChainStateService } from '../ORM/chain-state/chain-state.service';
+import { LeaderElectionService } from './leader-election.service';
 import * as zmq from 'zeromq';
 
 import { IBlockTemplate } from '../models/bitcoin-rpc/IBlockTemplate';
@@ -19,9 +21,15 @@ export class BitcoinRpcService implements OnModuleInit {
 
     constructor(
         private readonly configService: ConfigService,
-        private rpcBlockService: RpcBlockService
+        private rpcBlockService: RpcBlockService,
+        private readonly chainStateService: ChainStateService,
+        private readonly leaderElectionService: LeaderElectionService,
     ) {
     }
+
+    // Configurable polling intervals for resource-constrained environments
+    private readonly LEADER_POLL_MS = parseInt(process.env.BITCOIN_POLL_MS || '500');
+    private readonly WORKER_POLL_MS = parseInt(process.env.WORKER_POLL_MS || '1000');
 
     async onModuleInit() {
         const url = this.configService.get('BITCOIN_RPC_URL');
@@ -47,27 +55,32 @@ export class BitcoinRpcService implements OnModuleInit {
             console.error('Could not reach RPC host');
         });
 
-        if (this.configService.get('BITCOIN_ZMQ_HOST')) {
-            console.log('Using ZMQ');
-            const sock = new zmq.Subscriber;
+        if (this.leaderElectionService.getIsLeader()) {
+            if (this.configService.get('BITCOIN_ZMQ_HOST')) {
+                console.log('Using ZMQ');
+                const sock = new zmq.Subscriber;
 
 
-            sock.connectTimeout = 1000;
-            sock.events.on('connect', () => {
-                console.log('ZMQ Connected');
-            });
-            sock.events.on('connect:retry', () => {
-                console.log('ZMQ Unable to connect, Retrying');
-            });
+                sock.connectTimeout = 1000;
+                sock.events.on('connect', () => {
+                    console.log('ZMQ Connected');
+                });
+                sock.events.on('connect:retry', () => {
+                    console.log('ZMQ Unable to connect, Retrying');
+                });
 
-            sock.connect(this.configService.get('BITCOIN_ZMQ_HOST'));
-            sock.subscribe('rawblock');
-            // Don't await this, otherwise it will block the rest of the program
-            this.listenForNewBlocks(sock);
-            await this.pollMiningInfo();
+                sock.connect(this.configService.get('BITCOIN_ZMQ_HOST'));
+                sock.subscribe('rawblock');
+                // Don't await this, otherwise it will block the rest of the program
+                this.listenForNewBlocks(sock);
+                await this.pollMiningInfo();
 
+            } else {
+                setInterval(this.pollMiningInfo.bind(this), this.LEADER_POLL_MS);
+            }
         } else {
-            setInterval(this.pollMiningInfo.bind(this), 500);
+            // Workers poll chain_state table to detect new blocks
+            setInterval(this.pollChainState.bind(this), this.WORKER_POLL_MS);
         }
     }
 
@@ -78,12 +91,25 @@ export class BitcoinRpcService implements OnModuleInit {
         }
     }
 
+    private async pollChainState() {
+        const height = await this.chainStateService.getHeight();
+        if (height != null && height > this.blockHeight) {
+            console.log("Worker detected block height change via chain_state:", height);
+            const miningInfo = await this.getMiningInfo();
+            if (miningInfo != null) {
+                this._newBlock$.next(miningInfo);
+                this.blockHeight = height;
+            }
+        }
+    }
+
     public async pollMiningInfo() {
         const miningInfo = await this.getMiningInfo();
         if (miningInfo != null && miningInfo.blocks > this.blockHeight) {
             console.log("block height change");
             this._newBlock$.next(miningInfo);
             this.blockHeight = miningInfo.blocks;
+            await this.chainStateService.updateHeight(miningInfo.blocks);
         }
     }
 
@@ -106,26 +132,22 @@ export class BitcoinRpcService implements OnModuleInit {
             const block = await this.rpcBlockService.getBlock(blockHeight);
             const completeBlock = block?.data != null;
 
-            // If the block has already been loaded, and the same instance is fetching the template again, we just need to refresh it.
-            if (completeBlock && block.lockedBy == process.env.NODE_APP_INSTANCE) {
-                result = await this.loadBlockTemplate(blockHeight);
-            }
-            else if (completeBlock) {
+            if (completeBlock) {
                 return Promise.resolve(JSON.parse(block.data));
-            } else if (!completeBlock) {
-                if (process.env.NODE_APP_INSTANCE != null) {
-                    // There is a unique constraint on the block height so if another process tries to lock, it'll throw
-                    try {
-                        await this.rpcBlockService.lockBlock(blockHeight, process.env.NODE_APP_INSTANCE);
-                    } catch (e) {
-                        result = await this.waitForBlock(blockHeight);
-                    }
-                }
-                result = await this.loadBlockTemplate(blockHeight);
-            } else {
-                //wait for block
-                result = await this.waitForBlock(blockHeight);
             }
+
+            // Try to acquire lock using database unique constraint
+            try {
+                const processId = `proc-${process.pid}`;
+                await this.rpcBlockService.lockBlock(blockHeight, processId);
+            } catch (e) {
+                // Another process has the lock, wait for it
+                result = await this.waitForBlock(blockHeight);
+                console.log(`getblocktemplate tx count: ${result.transactions.length}`);
+                return result;
+            }
+
+            result = await this.loadBlockTemplate(blockHeight);
         } catch (e) {
             console.error('Error getblocktemplate:', e.message);
             throw new Error('Error getblocktemplate');
@@ -183,4 +205,3 @@ export class BitcoinRpcService implements OnModuleInit {
 
     }
 }
-

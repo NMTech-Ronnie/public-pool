@@ -1,6 +1,24 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: public-pool-postgres-testnet
+    restart: unless-stopped
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: publicpool
+      POSTGRES_PASSWORD: publicpool
+      POSTGRES_DB: publicpool
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U publicpool -d publicpool"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bitcoin-testnet
+
   bitcoin-testnet:
     container_name: bitcoin-testnet
     build:
@@ -28,16 +46,26 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - bitcoin-testnet
     ports:
       - "0.0.0.0:13333:13333/tcp"
       - "127.0.0.1:13334:13334/tcp"
     volumes:
-      - "./data/testnet/public-pool:/public-pool/DB"
       - "./public-pool-testnet.env:/public-pool/.env:ro"
     environment:
       - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=publicpool
+      - DB_PASSWORD=publicpool
+      - DB_NAME=publicpool
+
+volumes:
+  postgres-data:
 
 networks:
   bitcoin-testnet:

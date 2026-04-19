@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
+import { LeaderElectionService } from './leader-election.service';
 
 @Injectable()
 export class AppService implements OnModuleInit {
@@ -13,24 +14,14 @@ export class AppService implements OnModuleInit {
         private readonly clientService: ClientService,
         private readonly dataSource: DataSource,
         private readonly rpcBlockService: RpcBlockService,
+        private readonly leaderElectionService: LeaderElectionService,
     ) {
 
     }
 
     async onModuleInit() {
-        // if (process.env.NODE_APP_INSTANCE == '0') {
-        //     await this.dataSource.query(`VACUUM;`);
-        // }
 
-        //https://phiresky.github.io/blog/2020/sqlite-performance-tuning/
-        // //500 MB DB cache
-        // await this.dataSource.query(`PRAGMA cache_size = -500000;`);
-        //Normal is still completely corruption safe in WAL mode, and means only WAL checkpoints have to wait for FSYNC. 
-        await this.dataSource.query(`PRAGMA synchronous = off;`);
-        // //6Gb
-        // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
-
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (this.leaderElectionService.getIsLeader()) {
 
             setInterval(async () => {
                 await this.deleteOldStatistics();

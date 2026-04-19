@@ -186,8 +186,8 @@ export class ClientStatisticsService {
 
         const query = `
             SELECT
-                createdAt,
-                updatedAt,
+                "createdAt",
+                "updatedAt",
                 shares
             FROM
                 client_statistics_entity AS entry

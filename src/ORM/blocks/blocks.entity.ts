@@ -20,7 +20,7 @@ export class BlocksEntity extends TrackedEntity {
     @Column({ length: 8, type: 'varchar' })
     sessionId: string;
 
-    @Column()
+    @Column({ type: 'text' })
     blockData: string;
 
 }

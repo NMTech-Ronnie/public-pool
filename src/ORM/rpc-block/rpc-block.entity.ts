@@ -9,6 +9,9 @@ export class RpcBlockEntity {
     @Column({ nullable: true })
     lockedBy?: string;
 
-    @Column({ nullable: true })
+    @Column({ nullable: true, type: 'timestamptz' })
+    lockedAt?: Date;
+
+    @Column({ nullable: true, type: 'text' })
     data?: string;
 }

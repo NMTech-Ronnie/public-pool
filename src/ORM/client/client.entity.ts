@@ -10,6 +10,8 @@ import { TrackedEntity } from '../utils/TrackedEntity.entity';
 //WITHOUT ROWID tables work best when individual rows are not too large.
 @Entity({ withoutRowid: true })
 @Index(['address', 'clientName', 'sessionId'], { unique: true })
+// Index updatedAt for efficient stale connection cleanup queries
+@Index(['updatedAt'])
 export class ClientEntity extends TrackedEntity {
 
 

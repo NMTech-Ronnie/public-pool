@@ -6,6 +6,7 @@ import { combineLatest, delay, filter, from, interval, map, Observable, shareRep
 
 import { MiningJob } from '../models/MiningJob';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
+import { JobIdService } from './job-id.service';
 
 export interface IJobTemplate {
 
@@ -28,21 +29,19 @@ export class StratumV1JobsService {
     private skipNext: boolean = false;
     public newMiningJob$: Observable<IJobTemplate>;
 
-    public latestJobId: number = 1;
-    public latestJobTemplateId: number = 1;
-
     public jobs: { [jobId: string]: MiningJob } = {};
 
     public blocks: { [id: number]: IJobTemplate } = {};
 
-    // offset the interval so that all the cluster processes don't try and refresh at the same time.
-    private delay = process.env.NODE_APP_INSTANCE == null ? 0 : parseInt(process.env.NODE_APP_INSTANCE) * 5000;
+    // Configurable cache TTL to adapt to memory constraints (default 2 min, was 5 min)
+    private readonly JOB_TTL_MS = parseInt(process.env.JOB_CACHE_TTL_MS || '120000');
 
     constructor(
-        private readonly bitcoinRpcService: BitcoinRpcService
+        private readonly bitcoinRpcService: BitcoinRpcService,
+        private readonly jobIdService: JobIdService,
     ) {
 
-        this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(60000).pipe(delay(this.delay), startWith(-1))]).pipe(
+        this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(60000).pipe(delay(0), startWith(-1))]).pipe(
             switchMap(([miningInfo, interval]) => {
                 return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(map((blockTemplate) => {
                     return {
@@ -57,7 +56,6 @@ export class StratumV1JobsService {
                 if (this.lastIntervalCount === interval) {
                     clearJobs = true;
                     this.skipNext = true;
-                    console.log('new block')
                 }
 
                 if (this.skipNext == true && clearJobs == false) {
@@ -81,7 +79,7 @@ export class StratumV1JobsService {
                 };
             }),
             filter(next => next != null),
-            map(({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height }) => {
+            switchMap(async ({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height }) => {
                 const block = new bitcoinjs.Block();
 
                 //create an empty coinbase tx
@@ -108,8 +106,7 @@ export class StratumV1JobsService {
                 block.transactions = transactions;
                 block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(transactions, true);
 
-                const id = this.getNextTemplateId();
-                this.latestJobTemplateId++;
+                const id = await this.jobIdService.getNextTemplateId();
                 return {
                     block,
                     merkle_branch,
@@ -129,15 +126,15 @@ export class StratumV1JobsService {
                     this.jobs = {};
                 }else{
                     const now = new Date().getTime();
-                    // Delete old templates (5 minutes)
+                    // Delete old templates (configurable TTL)
                     for(const templateId in this.blocks){
-                        if(now - this.blocks[templateId].blockData.creation  > (1000 * 60 * 5)){
+                        if(now - this.blocks[templateId].blockData.creation  > this.JOB_TTL_MS){
                             delete this.blocks[templateId];
                         }
                     }
-                    // Delete old jobs (5 minutes)
+                    // Delete old jobs (configurable TTL)
                     for (const jobId in this.jobs) {
-                        if(now - this.jobs[jobId].creation > (1000 * 60 * 5)){
+                        if(now - this.jobs[jobId].creation > this.JOB_TTL_MS){
                             delete this.jobs[jobId];
                         }
                     }
@@ -170,20 +167,20 @@ export class StratumV1JobsService {
         return this.blocks[jobTemplateId];
     }
 
-    public addJob(job: MiningJob) {
+    public async addJob(job: MiningJob) {
         this.jobs[job.jobId] = job;
-        this.latestJobId++;
     }
 
     public getJobById(jobId: string) {
         return this.jobs[jobId];
     }
 
-    public getNextTemplateId() {
-        return this.latestJobTemplateId.toString(16);
+    public async getNextTemplateId(): Promise<string> {
+        return this.jobIdService.getNextTemplateId();
     }
-    public getNextId() {
-        return this.latestJobId.toString(16);
+
+    public async getNextId(): Promise<string> {
+        return this.jobIdService.getNextJobId();
     }
 
 

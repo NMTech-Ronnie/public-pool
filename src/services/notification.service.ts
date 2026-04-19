@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Block } from 'bitcoinjs-lib';
 
 import { DiscordService } from './discord.service';
+import { LeaderElectionService } from './leader-election.service';
 import { TelegramService } from './telegram.service';
 
 
@@ -10,11 +11,14 @@ export class NotificationService implements OnModuleInit {
 
     constructor(
         private readonly telegramService: TelegramService,
-        private readonly discordService: DiscordService
+        private readonly discordService: DiscordService,
+        private readonly leaderElectionService: LeaderElectionService,
     ) { }
 
     async onModuleInit(): Promise<void> {
-        await this.discordService.notifyRestarted();
+        if (this.leaderElectionService.getIsLeader()) {
+            await this.discordService.notifyRestarted();
+        }
     }
 
     public async notifySubscribersBlockFound(address: string, height: number, block: Block, message: string) {

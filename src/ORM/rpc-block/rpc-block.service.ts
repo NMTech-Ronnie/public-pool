@@ -19,7 +19,7 @@ export class RpcBlockService {
     }
 
     public lockBlock(blockHeight: number, process: string) {
-        return this.rpcBlockRepository.save({ blockHeight, data: null, lockedBy: process });
+        return this.rpcBlockRepository.save({ blockHeight, data: null, lockedBy: process, lockedAt: new Date() });
     }
 
     public saveBlock(blockHeight: number, data: string) {
@@ -33,9 +33,18 @@ export class RpcBlockService {
 
         const newestBlock = result ? result.maxNumber : null;
 
+        if (newestBlock != null) {
+            await this.rpcBlockRepository.createQueryBuilder()
+                .delete()
+                .where('"blockHeight" < :newestBlock', { newestBlock })
+                .execute();
+        }
+
+        // Clean up stale locks (older than 60 seconds with no data)
+        const timeout = new Date(Date.now() - 60 * 1000);
         await this.rpcBlockRepository.createQueryBuilder()
             .delete()
-            .where('"blockHeight" < :newestBlock', { newestBlock })
+            .where('"lockedAt" < :timeout AND data IS NULL', { timeout })
             .execute();
 
         return;

@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { Block } from 'bitcoinjs-lib';
 import { Client, Collection, Events, GatewayIntentBits, REST, Routes, SlashCommandBuilder, TextChannel } from 'discord.js';
 
+import { LeaderElectionService } from './leader-election.service';
+
 interface IDiscordCommand {
     data: SlashCommandBuilder;
     execute(interaction: any): Promise<void>;
@@ -33,8 +35,11 @@ export class DiscordService implements OnModuleInit {
     private commandCollection: Collection<string, IDiscordCommand>;
 
 
-    constructor(private readonly configService: ConfigService) {
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+    constructor(
+        private readonly configService: ConfigService,
+        private readonly leaderElectionService: LeaderElectionService,
+    ) {
+        if (this.leaderElectionService.getIsLeader()) {
             this.token = this.configService.get('DISCORD_BOT_TOKEN');
             this.clientId = this.configService.get('DISCORD_BOT_CLIENTID');
             this.guildId = this.configService.get('DISCORD_BOT_GUILD_ID');
@@ -61,7 +66,7 @@ export class DiscordService implements OnModuleInit {
 
     async onModuleInit(): Promise<void> {
 
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (this.leaderElectionService.getIsLeader()) {
             if (this.bot == null) {
                 return;
             }
@@ -93,7 +98,7 @@ export class DiscordService implements OnModuleInit {
     }
 
     private async registerCommands() {
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (this.leaderElectionService.getIsLeader()) {
             const rest = new REST().setToken(this.token);
             try {
                 console.log(`Started refreshing ${commands.length} application (/) commands.`);
@@ -113,7 +118,7 @@ export class DiscordService implements OnModuleInit {
     }
 
     public async notifyRestarted() {
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (this.leaderElectionService.getIsLeader()) {
             if (this.bot == null) {
                 return;
             }
@@ -125,7 +130,7 @@ export class DiscordService implements OnModuleInit {
     }
 
     public async notifySubscribersBlockFound(height: number, block: Block, message: string) {
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (this.leaderElectionService.getIsLeader()) {
             if (this.bot == null) {
                 return;
             }

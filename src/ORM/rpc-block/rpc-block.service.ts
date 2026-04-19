@@ -34,8 +34,12 @@ export class RpcBlockService {
   }
 
   public lockBlock(blockHeight: number, process: string) {
+    // Use insert() instead of save() so that a UNIQUE constraint violation
+    // is thrown if another worker already locked this block height.
+    // save() does an upsert (SELECT then INSERT/UPDATE) which silently
+    // overwrites the lock, causing ALL workers to call loadBlockTemplate.
     return this.retryOnBusy(() =>
-      this.rpcBlockRepository.save({
+      this.rpcBlockRepository.insert({
         blockHeight,
         data: null,
         lockedBy: process,

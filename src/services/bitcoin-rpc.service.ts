@@ -162,14 +162,26 @@ export class BitcoinRpcService implements OnModuleInit {
 
   private async loadBlockTemplate(blockHeight: number) {
     let blockTemplate: IBlockTemplate;
-    while (blockTemplate == null) {
-      blockTemplate = await this.client.getblocktemplate({
-        template_request: {
-          rules: ['segwit'],
-          mode: 'template',
-          capabilities: ['serverlist', 'proposal'],
-        },
-      });
+    const maxAttempts = 5;
+    for (let attempt = 0; attempt < maxAttempts && blockTemplate == null; attempt++) {
+      try {
+        blockTemplate = await this.client.getblocktemplate({
+          template_request: {
+            rules: ['segwit'],
+            mode: 'template',
+            capabilities: ['serverlist', 'proposal'],
+          },
+        });
+      } catch (e) {
+        console.error(`loadBlockTemplate attempt ${attempt + 1} failed:`, e?.message);
+        if (attempt < maxAttempts - 1) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    }
+
+    if (blockTemplate == null) {
+      throw new Error(`loadBlockTemplate failed after ${maxAttempts} attempts for height ${blockHeight}`);
     }
 
     await this.rpcBlockService.saveBlock(

@@ -85,23 +85,25 @@ export class ClientService {
     let heartbeatCount = 0;
     let bestDiffCount = 0;
 
-    // Use raw SQL inside a single TypeORM transaction for each batch type.
-    // This is dramatically faster than N individual TypeORM update() calls because:
-    // 1. One write lock acquisition per transaction (not per update)
-    // 2. No ORM metadata/query-builder overhead per row
-    // 3. Shared updatedAt timestamp avoids per-row Date construction
+    // Use raw SQL in chunked transactions to reduce write-lock hold time.
+    // A single transaction with hundreds of UPDATEs holds EXCLUSIVE lock too long,
+    // causing SQLITE_BUSY for other workers. Chunks of 50 limit lock to ~50ms each.
+    const CHUNK = 50;
 
     if (heartbeats.length > 0) {
       try {
         const now = new Date().toISOString();
-        await this.clientRepository.manager.transaction(async (manager) => {
-          for (const hb of heartbeats) {
-            await manager.query(
-              'UPDATE client_entity SET hashRate = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND deletedAt IS NULL',
-              [hb.hashRate, now, hb.address, hb.clientName, hb.sessionId],
-            );
-          }
-        });
+        for (let i = 0; i < heartbeats.length; i += CHUNK) {
+          const chunk = heartbeats.slice(i, i + CHUNK);
+          await this.clientRepository.manager.transaction(async (manager) => {
+            for (const hb of chunk) {
+              await manager.query(
+                'UPDATE client_entity SET hashRate = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND deletedAt IS NULL',
+                [hb.hashRate, now, hb.address, hb.clientName, hb.sessionId],
+              );
+            }
+          });
+        }
         heartbeatCount = heartbeats.length;
       } catch (e) {
         // SQLITE_BUSY or other error — data is lost for this cycle.
@@ -111,14 +113,17 @@ export class ClientService {
 
     if (bestDiffs.length > 0) {
       try {
-        await this.clientRepository.manager.transaction(async (manager) => {
-          for (const bd of bestDiffs) {
-            await manager.query(
-              'UPDATE client_entity SET bestDifficulty = ? WHERE address = ? AND clientName = ? AND sessionId = ?',
-              [bd.bestDifficulty, bd.address, bd.clientName, bd.sessionId],
-            );
-          }
-        });
+        for (let i = 0; i < bestDiffs.length; i += CHUNK) {
+          const chunk = bestDiffs.slice(i, i + CHUNK);
+          await this.clientRepository.manager.transaction(async (manager) => {
+            for (const bd of chunk) {
+              await manager.query(
+                'UPDATE client_entity SET bestDifficulty = ? WHERE address = ? AND clientName = ? AND sessionId = ?',
+                [bd.bestDifficulty, bd.address, bd.clientName, bd.sessionId],
+              );
+            }
+          });
+        }
         bestDiffCount = bestDiffs.length;
       } catch (e) {}
     }

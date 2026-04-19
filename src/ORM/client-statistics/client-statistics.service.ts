@@ -64,28 +64,32 @@ export class ClientStatisticsService {
       }
     }
 
-    // Wrap all updates in a single raw SQL transaction to minimize lock hold time
+    // Chunk updates into small transactions to reduce write-lock hold time
+    const CHUNK = 50;
     if (updates.length > 0) {
       try {
         const now = new Date().toISOString();
-        await this.clientStatisticsRepository.manager.transaction(
-          async (manager) => {
-            for (const stat of updates) {
-              await manager.query(
-                'UPDATE client_statistics_entity SET shares = ?, acceptedCount = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND time = ?',
-                [
-                  stat.shares,
-                  stat.acceptedCount,
-                  now,
-                  stat.address,
-                  stat.clientName,
-                  stat.sessionId,
-                  stat.time,
-                ],
-              );
-            }
-          },
-        );
+        for (let i = 0; i < updates.length; i += CHUNK) {
+          const chunk = updates.slice(i, i + CHUNK);
+          await this.clientStatisticsRepository.manager.transaction(
+            async (manager) => {
+              for (const stat of chunk) {
+                await manager.query(
+                  'UPDATE client_statistics_entity SET shares = ?, acceptedCount = ?, updatedAt = ? WHERE address = ? AND clientName = ? AND sessionId = ? AND time = ?',
+                  [
+                    stat.shares,
+                    stat.acceptedCount,
+                    now,
+                    stat.address,
+                    stat.clientName,
+                    stat.sessionId,
+                    stat.time,
+                  ],
+                );
+              }
+            },
+          );
+        }
         updateCount = updates.length;
       } catch (e) {
         // SQLITE_BUSY — data lost for this cycle, will be re-queued

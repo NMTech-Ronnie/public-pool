@@ -46,7 +46,7 @@ export class ClientService {
     for (let i = 0; i < queueCopy.length; i += BATCH) {
       const batch = queueCopy.slice(i, i + BATCH);
       let success = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 5; attempt++) {
         try {
           const results = await this.clientRepository.insert(
             batch.map((c) => c.partialClient),
@@ -57,8 +57,9 @@ export class ClientService {
           success = true;
           break;
         } catch (e: any) {
-          if (attempt < 2 && e?.message?.includes('SQLITE_BUSY')) {
-            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          if (attempt < 4 && e?.message?.includes('SQLITE_BUSY')) {
+            // Exponential backoff: 500, 1000, 2000, 4000ms
+            await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
             continue;
           }
           // On final failure, resolve with null so callers don't hang

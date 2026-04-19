@@ -11,13 +11,13 @@ export class RpcBlockService {
     private rpcBlockRepository: Repository<RpcBlockEntity>,
   ) {}
 
-  private async retryOnBusy<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  private async retryOnBusy<T>(fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await fn();
       } catch (e: any) {
         if (attempt < maxAttempts - 1 && e?.message?.includes('SQLITE_BUSY')) {
-          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
           continue;
         }
         throw e;

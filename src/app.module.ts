@@ -1,9 +1,10 @@
 import { HttpModule } from '@nestjs/axios';
 import { CacheModule } from '@nestjs/cache-manager';
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 
 import { AppController } from './app.controller';
 import { AddressController } from './controllers/address/address.controller';
@@ -48,8 +49,9 @@ const ORMModules = [
       autoLoadEntities: true,
       logging: false,
       enableWAL: true,
-      busyTimeout: 10 * 1000,
-    }),
+      // busyTimeout in TypeORM config is unreliable for sqlite3 driver.
+      // PRAGMAs are set explicitly via afterConnect subscriber below.
+    } as any),
     CacheModule.register(),
     ScheduleModule.forRoot(),
     HttpModule,
@@ -75,6 +77,28 @@ const ORMModules = [
     ExternalSharesService,
   ],
 })
-export class AppModule {
-  constructor() {}
+export class AppModule implements OnModuleInit {
+  constructor(private dataSource: DataSource) {}
+
+  async onModuleInit() {
+    // TypeORM's busyTimeout config is unreliable for the sqlite3 driver.
+    // Set critical PRAGMAs explicitly on the raw connection.
+    const runner = this.dataSource.createQueryRunner();
+    try {
+      // busy_timeout: wait up to 15s for the write lock instead of failing immediately.
+      // This is essential with 4 cluster workers sharing one SQLite file.
+      await runner.query('PRAGMA busy_timeout = 15000');
+      // synchronous=NORMAL is safe for WAL mode and dramatically reduces
+      // lock hold time (no fsync on every commit, only on checkpoint).
+      // Default is FULL which fsyncs every commit — huge contention multiplier.
+      await runner.query('PRAGMA synchronous = NORMAL');
+
+      // Verify
+      const bt = await runner.query('PRAGMA busy_timeout');
+      const sync = await runner.query('PRAGMA synchronous');
+      console.log(`[SQLite] busy_timeout=${bt[0]?.timeout}, synchronous=${sync[0]?.synchronous} (1=NORMAL)`);
+    } finally {
+      await runner.release();
+    }
+  }
 }

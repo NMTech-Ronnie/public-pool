@@ -5,6 +5,7 @@ import { BehaviorSubject, firstValueFrom } from 'rxjs';
 import { ObjectLiteral, Repository } from 'typeorm';
 
 import { ClientEntity } from './client.entity';
+import { WorkerStats } from '../../utils/worker-stats';
 
 
 // --- Write-Behind queue types ---
@@ -77,7 +78,7 @@ export class ClientService implements OnModuleDestroy {
             const params: any[] = [];
             let idx = 1;
             for (const entry of entries) {
-                valuesClauses.push(`($${idx}, $${idx + 1}, $${idx + 2}::timestamp)`);
+                valuesClauses.push(`($${idx}, $${idx + 1}::double precision, $${idx + 2}::timestamp)`);
                 params.push(entry.sessionId, entry.hashRate, entry.updatedAt.toISOString());
                 idx += 3;
             }
@@ -93,6 +94,7 @@ export class ClientService implements OnModuleDestroy {
 
             await this.clientRepository.query(sql, params);
         } catch (e) {
+            WorkerStats.getInstance().onHeartbeatFlushError();
             console.error('flushHeartbeats error:', e.message);
         }
     }
@@ -238,7 +240,8 @@ export class ClientService implements OnModuleDestroy {
             .select('client.userAgent as "userAgent"')
             .addSelect('COUNT(client.userAgent)', 'count')
             .addSelect('MAX(client.bestDifficulty)', 'bestDifficulty')
-            .addSelect('SUM(client.hashRate)', 'totalHashRate')
+            .addSelect('COALESCE(SUM(client.hashRate), 0)', 'totalHashRate')
+            .where('client."deletedAt" IS NULL')
             .groupBy('client.userAgent')
             .orderBy('count', 'DESC')
             .getRawMany();

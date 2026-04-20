@@ -57,6 +57,7 @@ export class StratumV1Client {
     private static readonly MAX_BUFFER_BYTES = 64 * 1024; // 64 KiB hard cap on a single line
 
     private miningSubmissionHashes = new Set<string>()
+    private destroyed = false;
 
     constructor(
         public readonly socket: Socket,
@@ -70,6 +71,19 @@ export class StratumV1Client {
         private readonly addressSettingsService: AddressSettingsService,
         private readonly externalSharesService: ExternalSharesService
     ) {
+
+        this.socket.on('close', () => {
+            this.destroy().catch(() => undefined);
+        });
+
+        this.socket.on('error', (error: NodeJS.ErrnoException) => {
+            WorkerStats.getInstance().onSocketWriteError(error?.code);
+            // Ignore common disconnect noise from internet clients.
+            if (error?.code !== 'EPIPE' && error?.code !== 'ECONNRESET') {
+                console.error(`Socket error: ${this.extraNonceAndSessionId ?? 'unknown'}`, error.message);
+            }
+            this.destroy().catch(() => undefined);
+        });
 
         this.socket.on('data', (data: Buffer) => {
             // Buffer-based newline scanning — avoid string concat GC pressure
@@ -113,6 +127,10 @@ export class StratumV1Client {
     }
 
     public async destroy() {
+        if (this.destroyed) {
+            return;
+        }
+        this.destroyed = true;
 
         if (this.extraNonceAndSessionId) {
             await this.clientService.delete(this.extraNonceAndSessionId);
@@ -178,13 +196,11 @@ export class StratumV1Client {
                         return;
                     }
                 } else {
-                    console.error('Subscription validation error');
                     const err = new StratumErrorMessage(
                         subscriptionMessage.id,
                         eStratumErrorCode.OtherUnknown,
                         'Subscription validation error',
                         errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
@@ -216,13 +232,11 @@ export class StratumV1Client {
                     }
 
                 } else {
-                    console.error('Configuration validation error');
                     const err = new StratumErrorMessage(
                         configurationMessage.id,
                         eStratumErrorCode.OtherUnknown,
                         'Configuration validation error',
                         errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
@@ -252,13 +266,11 @@ export class StratumV1Client {
                         return;
                     }
                 } else {
-                    console.error('Authorization validation error');
                     const err = new StratumErrorMessage(
                         authorizationMessage.id,
                         eStratumErrorCode.OtherUnknown,
                         'Authorization validation error',
                         errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
@@ -294,13 +306,11 @@ export class StratumV1Client {
                     }
                     this.usedSuggestedDifficulty = true;
                 } else {
-                    console.error('Suggest difficulty validation error');
                     const err = new StratumErrorMessage(
                         suggestDifficultyMessage.id,
                         eStratumErrorCode.OtherUnknown,
                         'Suggest difficulty validation error',
                         errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
@@ -311,7 +321,6 @@ export class StratumV1Client {
             case eRequestMethod.SUBMIT: {
 
                 if (this.stratumInitialized == false) {
-                    console.log('Submit before initalized');
                     await this.socket.end();
                     return;
                 }
@@ -340,13 +349,11 @@ export class StratumV1Client {
 
 
                 } else {
-                    console.log('Mining Submit validation error');
                     const err = new StratumErrorMessage(
                         miningSubmitMessage.id,
                         eStratumErrorCode.OtherUnknown,
                         'Mining Submit validation error',
                         errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
@@ -560,6 +567,7 @@ export class StratumV1Client {
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
+                    this.hashRate = this.statistics.hashRate;
                     this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
                     this.entity.updatedAt = now;
                 }
@@ -627,7 +635,10 @@ export class StratumV1Client {
             }) + '\n';
 
 
-            await this.socket.write(data);
+            const success = await this.write(data);
+            if (!success) {
+                return;
+            }
 
             const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
             // we need to clear the jobs so that the difficulty set takes effect. Otherwise the different miner implementations can cause issues
@@ -639,7 +650,7 @@ export class StratumV1Client {
 
     private async write(message: string): Promise<boolean> {
         try {
-            if (!this.socket.destroyed && !this.socket.writableEnded) {
+            if (!this.socket.destroyed && !this.socket.writableEnded && this.socket.writable) {
 
                 await new Promise((resolve, reject) => {
                     this.socket.write(message, (error) => {
@@ -653,7 +664,7 @@ export class StratumV1Client {
 
                 return true;
             } else {
-                console.error(`Error: Cannot write to closed or ended socket. ${this.extraNonceAndSessionId} ${message}`);
+                WorkerStats.getInstance().onSocketClosedWrite();
                 this.destroy();
                 if (!this.socket.destroyed) {
                     this.socket.destroy();
@@ -662,12 +673,14 @@ export class StratumV1Client {
             }
         } catch (error) {
             this.destroy();
-            if (!this.socket.writableEnded) {
-                await this.socket.end();
-            } else if (!this.socket.destroyed) {
+            if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
-            console.error(`Error occurred while writing to socket: ${this.extraNonceAndSessionId}`, error);
+            const err = error as NodeJS.ErrnoException;
+            WorkerStats.getInstance().onSocketWriteError(err?.code);
+            if (err?.code !== 'EPIPE' && err?.code !== 'ECONNRESET' && err?.code !== 'ERR_STREAM_DESTROYED') {
+                console.error(`Error occurred while writing to socket: ${this.extraNonceAndSessionId}`, err);
+            }
             return false;
         }
     }

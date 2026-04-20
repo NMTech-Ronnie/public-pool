@@ -1,4 +1,4 @@
-import cluster from 'node:cluster';
+const cluster = require('node:cluster');
 import { availableParallelism } from 'node:os';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';

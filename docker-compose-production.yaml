@@ -75,7 +75,10 @@ services:
 
   public-pool:
     container_name: public-pool
-    image: ghcr.io/sethforprivacy/public-pool:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: public-pool:local
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:

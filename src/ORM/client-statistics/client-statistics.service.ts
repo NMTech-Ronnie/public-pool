@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
+import { WorkerStats } from '../../utils/worker-stats';
 
 
 // Write-Behind queue key
@@ -116,6 +117,7 @@ export class ClientStatisticsService implements OnModuleDestroy {
                 await this.clientStatisticsRepository.query(sql, params);
             }
         } catch (e) {
+            WorkerStats.getInstance().onStatsFlushError();
             console.error('flushStatistics error:', e.message);
         }
     }
@@ -172,17 +174,21 @@ export class ClientStatisticsService implements OnModuleDestroy {
             GROUP BY
                 "time"
             ORDER BY
-                "time"
+                "time" DESC
             LIMIT 144
         `;
 
         const result: any[] = await this.clientStatisticsRepository.query(query, [yesterday.getTime()]);
 
 
-        return result.map(res => {
-            res.label = new Date(parseInt(res.label)).toISOString();
-            return res;
-        }).slice(0, result.length - 1)
+        return result
+            .reverse()
+            .map(res => {
+                return {
+                    label: new Date(Number(res.label)).toISOString(),
+                    data: Number(res.data ?? 0)
+                };
+            });
 
     }
 
@@ -202,16 +208,20 @@ export class ClientStatisticsService implements OnModuleDestroy {
                 GROUP BY
                     "time"
                 ORDER BY
-                    "time"
+                    "time" DESC
                 LIMIT 144
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address, yesterday.getTime()]);
 
-        return result.map(res => {
-            res.label = new Date(parseInt(res.label)).toISOString();
-            return res;
-        }).slice(0, result.length - 1);
+        return result
+            .reverse()
+            .map(res => {
+                return {
+                    label: new Date(Number(res.label)).toISOString(),
+                    data: Number(res.data ?? 0)
+                };
+            });
 
 
     }
@@ -253,16 +263,20 @@ export class ClientStatisticsService implements OnModuleDestroy {
             GROUP BY
                 "time"
             ORDER BY
-                "time"
+                "time" DESC
             LIMIT 144
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName, yesterday.getTime()]);
 
-        return result.map(res => {
-            res.label = new Date(parseInt(res.label)).toISOString();
-            return res;
-        }).slice(0, result.length - 1);
+        return result
+            .reverse()
+            .map(res => {
+                return {
+                    label: new Date(Number(res.label)).toISOString(),
+                    data: Number(res.data ?? 0)
+                };
+            });
 
 
     }
@@ -324,16 +338,20 @@ export class ClientStatisticsService implements OnModuleDestroy {
             GROUP BY
                 "time"
             ORDER BY
-                "time"
+                "time" DESC
             LIMIT 144
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName, sessionId, yesterday.getTime()]);
 
-        return result.map(res => {
-            res.label = new Date(parseInt(res.label)).toISOString();
-            return res;
-        }).slice(0, result.length - 1);
+        return result
+            .reverse()
+            .map(res => {
+                return {
+                    label: new Date(Number(res.label)).toISOString(),
+                    data: Number(res.data ?? 0)
+                };
+            });
 
     }
 

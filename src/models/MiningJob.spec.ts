@@ -1,7 +1,7 @@
 import { ConfigService } from "@nestjs/config";
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { Test, TestingModule } from "@nestjs/testing";
-import { MiningJob } from "./MiningJob";
+import { SharedMiningJob } from "./MiningJob";
 import { IJobTemplate } from "../services/stratum-v1-jobs.service";
 
 
@@ -32,7 +32,7 @@ function extractPoolIdentifierFromScript(coinbaseHex: string) {
     return coinbaseDataAscii;
 }
 
-describe('MiningJob', () => {
+describe('SharedMiningJob', () => {
     let moduleRef: TestingModule;
     let configService: ConfigService;
     let block: bitcoinjs.Block;
@@ -92,12 +92,12 @@ describe('MiningJob', () => {
                 }
             } as IJobTemplate;
         });
-        it('should create a new MiningJob if POOL_IDENTIFIER is not set and use the default', () => {
+        it('should create a new SharedMiningJob if POOL_IDENTIFIER is not set and use the default', () => {
             const expectedMiningIdentifier = 'Public-Pool';
             expect(jobTemplate.block).toBeDefined();
-            const miningJob = new MiningJob(configService, bitcoinjs.networks.testnet, '1', payoutInformation, jobTemplate);
+            const miningJob = new SharedMiningJob(configService, bitcoinjs.networks.testnet, payoutInformation, jobTemplate);
 
-            const response = JSON.parse(miningJob.response(jobTemplate));
+            const response = JSON.parse(miningJob.getNotifyPayload('1'));
 
             const miningIdentifier = extractPoolIdentifierFromScript(response.params[2]);
             expect(miningIdentifier).toBe(expectedMiningIdentifier);
@@ -114,8 +114,8 @@ describe('MiningJob', () => {
                 return null;
             });
 
-            const miningJob = new MiningJob(configService, bitcoinjs.networks.testnet, '1', payoutInformation, jobTemplate);
-            const response = JSON.parse(miningJob.response(jobTemplate));
+            const miningJob = new SharedMiningJob(configService, bitcoinjs.networks.testnet, payoutInformation, jobTemplate);
+            const response = JSON.parse(miningJob.getNotifyPayload('1'));
 
             const miningIdentifier = extractPoolIdentifierFromScript(response.params[2]);
             expect(miningIdentifier).toBe(expectedMiningIdentifier);
@@ -133,8 +133,8 @@ describe('MiningJob', () => {
                 return null;
             });
 
-            const miningJob = new MiningJob(configService, bitcoinjs.networks.testnet, '1', payoutInformation, jobTemplate);
-            const response = JSON.parse(miningJob.response(jobTemplate));
+            const miningJob = new SharedMiningJob(configService, bitcoinjs.networks.testnet, payoutInformation, jobTemplate);
+            const response = JSON.parse(miningJob.getNotifyPayload('1'));
 
             const miningIdentifier = extractPoolIdentifierFromScript(response.params[2]);
             expect(console.warn).toBeCalledWith('Block weight exceeds the maximum allowed weight, removing the pool identifier');
@@ -152,8 +152,8 @@ describe('MiningJob', () => {
                 return null;
             });
 
-            const miningJob = new MiningJob(configService, bitcoinjs.networks.testnet, '1', payoutInformation, jobTemplate);
-            const response = JSON.parse(miningJob.response(jobTemplate));
+            const miningJob = new SharedMiningJob(configService, bitcoinjs.networks.testnet, payoutInformation, jobTemplate);
+            const response = JSON.parse(miningJob.getNotifyPayload('1'));
 
             const miningIdentifier = extractPoolIdentifierFromScript(response.params[2]);
             expect(miningIdentifier).toBe(expectedMiningIdentifier);
@@ -170,8 +170,8 @@ describe('MiningJob', () => {
                 return null;
             });
 
-            const miningJob = new MiningJob(configService, bitcoinjs.networks.testnet, '1', payoutInformation, jobTemplate);
-            const response = JSON.parse(miningJob.response(jobTemplate));
+            const miningJob = new SharedMiningJob(configService, bitcoinjs.networks.testnet, payoutInformation, jobTemplate);
+            const response = JSON.parse(miningJob.getNotifyPayload('1'));
 
             const miningIdentifier = extractPoolIdentifierFromScript(response.params[2]);
             expect(console.warn).toBeCalledWith('Pool identifier is too long, removing the pool identifier');

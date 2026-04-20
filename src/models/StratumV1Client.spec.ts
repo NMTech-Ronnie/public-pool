@@ -115,7 +115,7 @@ describe('StratumV1Client', () => {
         bitcoinRpcService.newBlock$ = newBlockEmitter.asObservable();
 
 
-        stratumV1JobsService = new StratumV1JobsService(bitcoinRpcService);
+        stratumV1JobsService = new StratumV1JobsService(bitcoinRpcService, configService);
 
         socket = new Socket();
         // jest.spyOn(socket, 'on').mockImplementation((event: string, fn: (data: Buffer) => void) => {

@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as merkle from 'merkle-lib';
 import * as merkleProof from 'merkle-lib/proof';
 import { combineLatest, delay, filter, from, interval, map, Observable, shareReplay, startWith, switchMap, tap } from 'rxjs';
 
-import { MiningJob } from '../models/MiningJob';
+import { SharedMiningJob, MinerJobRef } from '../models/MiningJob';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
 
 export interface IJobTemplate {
@@ -31,16 +32,42 @@ export class StratumV1JobsService {
     public latestJobId: number = 1;
     public latestJobTemplateId: number = 1;
 
-    public jobs: { [jobId: string]: MiningJob } = {};
+    /** Per-miner job refs (lightweight) */
+    public jobs: { [jobId: string]: MinerJobRef } = {};
+
+    /** Shared job templates indexed by payoutKey:templateId */
+    public sharedJobs: { [key: string]: SharedMiningJob } = {};
 
     public blocks: { [id: number]: IJobTemplate } = {};
+
+    /** Cached network and fee config */
+    private network: bitcoinjs.networks.Network;
+    private devFeeAddress: string | null;
 
     // offset the interval so that all the cluster processes don't try and refresh at the same time.
     private delay = process.env.NODE_APP_INSTANCE == null ? 0 : parseInt(process.env.NODE_APP_INSTANCE) * 5000;
 
     constructor(
-        private readonly bitcoinRpcService: BitcoinRpcService
+        private readonly bitcoinRpcService: BitcoinRpcService,
+        private readonly configService: ConfigService,
     ) {
+
+        // Resolve network once
+        const networkConfig = this.configService.get('NETWORK');
+        if (networkConfig === 'mainnet') {
+            this.network = bitcoinjs.networks.bitcoin;
+        } else if (networkConfig === 'testnet') {
+            this.network = bitcoinjs.networks.testnet;
+        } else if (networkConfig === 'regtest') {
+            this.network = bitcoinjs.networks.regtest;
+        } else {
+            this.network = bitcoinjs.networks.bitcoin;
+        }
+
+        this.devFeeAddress = this.configService.get('DEV_FEE_ADDRESS') || null;
+        if (this.devFeeAddress && this.devFeeAddress.length < 1) {
+            this.devFeeAddress = null;
+        }
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(60000).pipe(delay(this.delay), startWith(-1))]).pipe(
             switchMap(([miningInfo, interval]) => {
@@ -127,6 +154,7 @@ export class StratumV1JobsService {
                 if (data.blockData.clearJobs) {
                     this.blocks = {};
                     this.jobs = {};
+                    this.sharedJobs = {};
                 }else{
                     const now = new Date().getTime();
                     // Delete old templates (5 minutes)
@@ -141,11 +169,60 @@ export class StratumV1JobsService {
                             delete this.jobs[jobId];
                         }
                     }
+                    // Delete old shared jobs (5 minutes)
+                    for (const key in this.sharedJobs) {
+                        if(now - this.sharedJobs[key].creation > (1000 * 60 * 5)){
+                            delete this.sharedJobs[key];
+                        }
+                    }
                 }
                 this.blocks[data.blockData.id] = data;
+
+                // Pre-generate shared jobs for fee and noFee payout sets
+                this.preGenerateSharedJobs(data);
             }),
             shareReplay({ refCount: true, bufferSize: 1 })
         )
+    }
+
+    /**
+     * Pre-generate SharedMiningJob instances for both fee and noFee payout sets.
+     * These are shared across all miners subscribing to this template.
+     */
+    private preGenerateSharedJobs(jobTemplate: IJobTemplate) {
+        // noFee payout — placeholder address, real address filled per miner
+        // We can't pre-generate per-address templates, but we CAN pre-generate
+        // the two variants: with dev fee and without dev fee.
+        // Since the actual miner address varies, we still need per-miner jobs
+        // UNLESS all miners share the same coinbase structure.
+        //
+        // For now, shared jobs are created on-demand per (payoutKey, templateId)
+        // in getOrCreateSharedJob(). The pre-generation here is a no-op placeholder.
+    }
+
+    /**
+     * Get or create a SharedMiningJob for the given payout set and template.
+     * Returns a cached instance if one already exists.
+     */
+    public getOrCreateSharedJob(
+        payoutInformation: { address: string; percent: number }[],
+        jobTemplate: IJobTemplate
+    ): SharedMiningJob {
+        // Build a stable cache key from payout addresses + template id
+        const payoutKey = payoutInformation.map(p => `${p.address}:${p.percent}`).join('|');
+        const cacheKey = `${payoutKey}::${jobTemplate.blockData.id}`;
+
+        let shared = this.sharedJobs[cacheKey];
+        if (!shared) {
+            shared = new SharedMiningJob(
+                this.configService,
+                this.network,
+                payoutInformation,
+                jobTemplate
+            );
+            this.sharedJobs[cacheKey] = shared;
+        }
+        return shared;
     }
 
     private calculateNetworkDifficulty(nBits: number) {
@@ -170,13 +247,46 @@ export class StratumV1JobsService {
         return this.blocks[jobTemplateId];
     }
 
-    public addJob(job: MiningJob) {
-        this.jobs[job.jobId] = job;
+    public addMinerJobRef(ref: MinerJobRef) {
+        this.jobs[ref.jobId] = ref;
         this.latestJobId++;
     }
 
-    public getJobById(jobId: string) {
+    public getJobById(jobId: string): MinerJobRef | undefined {
         return this.jobs[jobId];
+    }
+
+    public getSharedJobByKey(payoutKey: string, templateId: string): SharedMiningJob | undefined {
+        // We need to find the shared job that matches this payout key and template
+        for (const key in this.sharedJobs) {
+            if (key.startsWith(payoutKey + '::') && key.endsWith('::' + templateId)) {
+                return this.sharedJobs[key];
+            }
+        }
+        // Fallback: search by templateId in all shared jobs
+        for (const key in this.sharedJobs) {
+            const shared = this.sharedJobs[key];
+            if (shared.jobTemplateId === templateId) {
+                // Check if payoutKey matches
+                if (key.startsWith(payoutKey + '::')) {
+                    return shared;
+                }
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Find the SharedMiningJob that was used for a given MinerJobRef
+     */
+    public getSharedJobForMinerRef(ref: MinerJobRef): SharedMiningJob | undefined {
+        for (const key in this.sharedJobs) {
+            const shared = this.sharedJobs[key];
+            if (shared.jobTemplateId === ref.jobTemplateId && key.startsWith(ref.payoutKey + '::')) {
+                return shared;
+            }
+        }
+        return undefined;
     }
 
     public getNextTemplateId() {

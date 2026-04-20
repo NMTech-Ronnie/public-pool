@@ -7,123 +7,197 @@ import { IMiningNotify } from './stratum-messages/IMiningNotify';
 import { ConfigService } from '@nestjs/config';
 
 const MAX_BLOCK_WEIGHT = 4000000;
-const MAX_SCRIPT_SIZE = 100; //   https://github.com/bitcoin/bitcoin/blob/ffdc3d6060f6e65e69cf115a13b83e6eb4a0a0a8/src/consensus/tx_check.cpp#L49
+const MAX_SCRIPT_SIZE = 100;
+
 interface AddressObject {
     address: string;
     percent: number;
 }
-export class MiningJob {
 
-    private coinbaseTransaction: bitcoinjs.Transaction;
-    private coinbasePart1: string;
-    private coinbasePart2: string;
+/**
+ * SharedMiningJob: a pre-built coinbase template shared by all miners
+ * with the same payout set. Only ONE is created per (payoutSet, jobTemplate) pair.
+ * Individual miners just get a per-miner jobId and write the shared cached notify payload
+ * with their extraNonce substituted in at write time.
+ */
+export class SharedMiningJob {
 
-    public jobTemplateId: string;
-    public networkDifficulty: number;
-    public creation: number;
+    public readonly coinbaseTransaction: bitcoinjs.Transaction;
+    public readonly coinbasePart1: string;
+    public readonly coinbasePart2: string;
+    public readonly jobTemplateId: string;
+    public readonly creation: number;
+
+    /** Pre-serialized notify payload (without jobId placeholder filled) */
+    private cachedNotifyPrefix: string;
+    private cachedNotifySuffix: string;
 
     constructor(
         configService: ConfigService,
         private network: bitcoinjs.networks.Network,
-        public jobId: string,
         payoutInformation: AddressObject[],
-        jobTemplate: IJobTemplate
+        public readonly jobTemplate: IJobTemplate
     ) {
-
-        this.creation = new Date().getTime();
+        this.creation = Date.now();
         this.jobTemplateId = jobTemplate.blockData.id;
 
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
 
-        //The commitment is recorded in a scriptPubKey of the coinbase transaction. It must be at least 38 bytes, with the first 6-byte of 0x6a24aa21a9ed, that is:
-        //     1-byte - OP_RETURN (0x6a)
-        //     1-byte - Push the following 36 bytes (0x24)
-        //     4-byte - Commitment header (0xaa21a9ed)
         const segwitMagicBits = Buffer.from('aa21a9ed', 'hex');
-        //    32-byte - Commitment hash: Double-SHA256(witness root hash|witness reserved value)
 
-        //    39th byte onwards: Optional data with no consensus meaning
-        // Initial pool identifier
         let poolIdentifier = configService.get('POOL_IDENTIFIER') || 'Public-Pool';
         let extra = Buffer.from(poolIdentifier);
 
-        // Encode the block height
-        // https://github.com/bitcoin/bips/blob/master/bip-0034.mediawiki
         const blockHeightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
-
-        // Get the length of the block height encoding
         const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
+        const padding = Buffer.alloc(8 + (3 - blockHeightEncoded.length), 0);
 
-        // Generate padding and take length of encode blockHeight into account
-        const padding = Buffer.alloc(8 + (3 - blockHeightEncoded.length), 0)
-
-        // Build the script
         let script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, extra, padding]);
-        // Check if the pool identifier is too long
         if (script.length > MAX_SCRIPT_SIZE) {
             console.warn('Pool identifier is too long, removing the pool identifier');
             script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, padding]);
         }
 
         this.coinbaseTransaction.ins[0].script = script;
-        this.coinbaseTransaction.addOutput(bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagicBits, jobTemplate.block.witnessCommit])]), 0);
+        this.coinbaseTransaction.addOutput(
+            bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagicBits, jobTemplate.block.witnessCommit])]),
+            0
+        );
 
-        // Check if the pool identifier is too long
         if ((this.coinbaseTransaction.weight() + jobTemplate.block.weight()) > MAX_BLOCK_WEIGHT) {
             console.warn('Block weight exceeds the maximum allowed weight, removing the pool identifier');
-            let script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, padding]);
+            script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, padding]);
             this.coinbaseTransaction.ins[0].script = script;
         }
 
-        // get the non-witness coinbase tx
         //@ts-ignore
         const serializedCoinbaseTx = this.coinbaseTransaction.__toBuffer().toString('hex');
-
         const inputScript = this.coinbaseTransaction.ins[0].script.toString('hex');
-
         const partOneIndex = serializedCoinbaseTx.indexOf(inputScript) + inputScript.length;
 
         this.coinbasePart1 = serializedCoinbaseTx.slice(0, partOneIndex - 16);
         this.coinbasePart2 = serializedCoinbaseTx.slice(partOneIndex);
 
-
+        // Pre-compute the notify payload template (jobId will be spliced in per miner)
+        this.buildCachedNotify();
     }
 
-    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
+    private buildCachedNotify() {
+        const jt = this.jobTemplate;
+        // Build the full params array except jobId (index 0)
+        // We serialize everything once. Per-miner we only splice in the jobId.
+        const notify: IMiningNotify = {
+            id: null,
+            method: eResponseMethod.MINING_NOTIFY,
+            params: [
+                '__JOB_ID__', // placeholder
+                this.swapEndianWords(jt.block.prevHash).toString('hex'),
+                this.coinbasePart1,
+                this.coinbasePart2,
+                jt.merkle_branch,
+                jt.block.version.toString(16),
+                jt.block.bits.toString(16),
+                jt.block.timestamp.toString(16),
+                jt.blockData.clearJobs
+            ]
+        };
+        const full = JSON.stringify(notify);
+        const placeholderIdx = full.indexOf('"__JOB_ID__"');
+        this.cachedNotifyPrefix = full.substring(0, placeholderIdx);
+        this.cachedNotifySuffix = full.substring(placeholderIdx + '"__JOB_ID__"'.length);
+    }
 
+    /**
+     * Get the per-miner notify string. Only the jobId differs.
+     * Avoids re-serializing the entire payload per miner.
+     */
+    public getNotifyPayload(jobId: string): string {
+        return this.cachedNotifyPrefix + '"' + jobId + '"' + this.cachedNotifySuffix + '\n';
+    }
+
+    /**
+     * Validate a share by building only the 80-byte block header.
+     * No Object.assign, no transaction cloning.
+     * Returns { headerBuffer, merkleRoot } for difficulty check.
+     */
+    public buildHeaderBuffer(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        extraNonce: string,
+        extraNonce2: string,
+        timestamp: number
+    ): Buffer {
+        // 1. Rebuild coinbase hash with the submitted extraNonces
+        const nonceScript = this.coinbaseTransaction.ins[0].script.toString('hex');
+        const updatedScript = nonceScript.substring(0, nonceScript.length - 16) + extraNonce + extraNonce2;
+        const scriptBuf = Buffer.from(updatedScript, 'hex');
+
+        // Clone ONLY the coinbase tx input script, compute its txid
+        // We create a minimal copy of the coinbase tx for hashing
+        const cbClone = this.coinbaseTransaction.clone();
+        cbClone.ins[0].script = scriptBuf;
+        const coinbaseHash = cbClone.getHash(false);
+
+        // 2. Compute merkle root from coinbase hash + merkle branches
+        const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, jobTemplate.merkle_branch);
+
+        // 3. Build 80-byte header: version(4) + prevHash(32) + merkleRoot(32) + timestamp(4) + bits(4) + nonce(4)
+        const header = Buffer.allocUnsafe(80);
+        let version = jobTemplate.block.version;
+        if (versionMask !== undefined && versionMask !== 0) {
+            version = version ^ versionMask;
+        }
+        header.writeInt32LE(version, 0);
+        jobTemplate.block.prevHash.copy(header, 4);
+        merkleRoot.copy(header, 36);
+        header.writeUInt32LE(timestamp, 68);
+        header.writeUInt32LE(jobTemplate.block.bits, 72);
+        header.writeUInt32LE(nonce, 76);
+
+        return header;
+    }
+
+    /**
+     * Full block reconstruction — only called when a block is actually found (rare).
+     */
+    public buildFullBlock(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        extraNonce: string,
+        extraNonce2: string,
+        timestamp: number
+    ): bitcoinjs.Block {
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
         testBlock.transactions = jobTemplate.block.transactions.map(tx => {
             return Object.assign(new bitcoinjs.Transaction(), tx);
         });
 
-        testBlock.transactions[0] = this.coinbaseTransaction;
-
+        testBlock.transactions[0] = this.coinbaseTransaction.clone();
         testBlock.nonce = nonce;
 
-        // recompute version mask
-        if (versionMask !== undefined && versionMask != 0) {
-            testBlock.version = (testBlock.version ^ versionMask);
+        if (versionMask !== undefined && versionMask !== 0) {
+            testBlock.version = testBlock.version ^ versionMask;
         }
 
-        // set the nonces
         const nonceScript = testBlock.transactions[0].ins[0].script.toString('hex');
+        testBlock.transactions[0].ins[0].script = Buffer.from(
+            `${nonceScript.substring(0, nonceScript.length - 16)}${extraNonce}${extraNonce2}`,
+            'hex'
+        );
 
-        testBlock.transactions[0].ins[0].script = Buffer.from(`${nonceScript.substring(0, nonceScript.length - 16)}${extraNonce}${extraNonce2}`, 'hex');
-
-        //recompute the root since we updated the coinbase script with the nonces
-        testBlock.merkleRoot = this.calculateMerkleRootHash(testBlock.transactions[0].getHash(false), jobTemplate.merkle_branch);
-
-
+        testBlock.merkleRoot = this.calculateMerkleRootHash(
+            testBlock.transactions[0].getHash(false),
+            jobTemplate.merkle_branch
+        );
         testBlock.timestamp = timestamp;
 
         return testBlock;
     }
 
-
     private calculateMerkleRootHash(newRoot: Buffer, merkleBranches: string[]): Buffer {
-
         const bothMerkles = Buffer.alloc(64);
-
         bothMerkles.set(newRoot);
 
         for (let i = 0; i < merkleBranches.length; i++) {
@@ -132,35 +206,23 @@ export class MiningJob {
             bothMerkles.set(newRoot);
         }
 
-        return bothMerkles.subarray(0, 32)
+        return bothMerkles.subarray(0, 32);
     }
 
-
     private createCoinbaseTransaction(addresses: AddressObject[], reward: number): bitcoinjs.Transaction {
-        // Part 1
         const coinbaseTransaction = new bitcoinjs.Transaction();
-
-        // Set the version of the transaction
         coinbaseTransaction.version = 2;
-
-        // Add the coinbase input (input with no previous output)
         coinbaseTransaction.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
 
-        // Add an output
         let rewardBalance = reward;
-
         addresses.forEach(recipientAddress => {
             const amount = Math.floor((recipientAddress.percent / 100) * reward);
             rewardBalance -= amount;
             coinbaseTransaction.addOutput(this.getPaymentScript(recipientAddress.address), amount);
-        })
-
-        //Add any remaining sats from the Math.floor
+        });
         coinbaseTransaction.outs[0].value += rewardBalance;
 
         const segwitWitnessReservedValue = Buffer.alloc(32, 0);
-
-        //and the coinbase's input's witness must consist of a single 32-byte array for the witness reserved value
         coinbaseTransaction.ins[0].witness = [segwitWitnessReservedValue];
 
         return coinbaseTransaction;
@@ -169,61 +231,45 @@ export class MiningJob {
     private getPaymentScript(address: string): Buffer {
         const addressInfo = getAddressInfo(address);
         switch (addressInfo.type) {
-            case AddressType.p2wpkh: {
+            case AddressType.p2wpkh:
                 return bitcoinjs.payments.p2wpkh({ address, network: this.network }).output;
-            }
-            case AddressType.p2pkh: {
+            case AddressType.p2pkh:
                 return bitcoinjs.payments.p2pkh({ address, network: this.network }).output;
-            }
-            case AddressType.p2sh: {
+            case AddressType.p2sh:
                 return bitcoinjs.payments.p2sh({ address, network: this.network }).output;
-            }
-            case AddressType.p2tr: {
+            case AddressType.p2tr:
                 return bitcoinjs.payments.p2tr({ address, network: this.network }).output;
-            }
-            case AddressType.p2wsh: {
+            case AddressType.p2wsh:
                 return bitcoinjs.payments.p2wsh({ address, network: this.network }).output;
-            }
-            default: {
+            default:
                 return Buffer.alloc(0);
-            }
         }
     }
 
-    public response(jobTemplate: IJobTemplate): string {
-
-        const job: IMiningNotify = {
-            id: null,
-            method: eResponseMethod.MINING_NOTIFY,
-            params: [
-                this.jobId,
-                this.swapEndianWords(jobTemplate.block.prevHash).toString('hex'),
-                this.coinbasePart1,
-                this.coinbasePart2,
-                jobTemplate.merkle_branch,
-                jobTemplate.block.version.toString(16),
-                jobTemplate.block.bits.toString(16),
-                jobTemplate.block.timestamp.toString(16),
-                jobTemplate.blockData.clearJobs
-            ]
-        };
-
-        return JSON.stringify(job) + '\n';
-    }
-
-
     private swapEndianWords(buffer: Buffer): Buffer {
         const swappedBuffer = Buffer.alloc(buffer.length);
-
         for (let i = 0; i < buffer.length; i += 4) {
             swappedBuffer[i] = buffer[i + 3];
             swappedBuffer[i + 1] = buffer[i + 2];
             swappedBuffer[i + 2] = buffer[i + 1];
             swappedBuffer[i + 3] = buffer[i];
         }
-
         return swappedBuffer;
     }
+}
 
 
+/**
+ * Lightweight per-miner job reference. Only stores the jobId and a pointer
+ * to the shared template + the payout key.
+ */
+export class MinerJobRef {
+    public readonly creation: number;
+    constructor(
+        public readonly jobId: string,
+        public readonly jobTemplateId: string,
+        public readonly payoutKey: string, // 'fee' or 'noFee'
+    ) {
+        this.creation = Date.now();
+    }
 }

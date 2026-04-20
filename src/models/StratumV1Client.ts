@@ -1,5 +1,4 @@
 import { ConfigService } from '@nestjs/config';
-import * as bitcoinjs from 'bitcoinjs-lib';
 import { plainToInstance } from 'class-transformer';
 import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
@@ -18,7 +17,7 @@ import { IJobTemplate, StratumV1JobsService } from '../services/stratum-v1-jobs.
 import { eRequestMethod } from './enums/eRequestMethod';
 import { eResponseMethod } from './enums/eResponseMethod';
 import { eStratumErrorCode } from './enums/eStratumErrorCode';
-import { MiningJob } from './MiningJob';
+import { SharedMiningJob, MinerJobRef } from './MiningJob';
 import { AuthorizationMessage } from './stratum-messages/AuthorizationMessage';
 import { ConfigurationMessage } from './stratum-messages/ConfigurationMessage';
 import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
@@ -28,6 +27,7 @@ import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
 import { DifficultyUtils } from '../utils/difficulty.utils';
+import { WorkerStats } from '../utils/worker-stats';
 
 
 export class StratumV1Client {
@@ -52,7 +52,8 @@ export class StratumV1Client {
     public noFee: boolean;
     public hashRate: number = 0;
 
-    private buffer: string = '';
+    private buffer: Buffer = Buffer.alloc(0);
+    private static readonly NEWLINE = 0x0a; // '\n'
 
     private miningSubmissionHashes = new Set<string>()
 
@@ -70,20 +71,31 @@ export class StratumV1Client {
     ) {
 
         this.socket.on('data', (data: Buffer) => {
-            this.buffer += data.toString();
-            let lines = this.buffer.split('\n');
-            this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
+            // Buffer-based newline scanning — avoid string concat GC pressure
+            this.buffer = this.buffer.length > 0 ? Buffer.concat([this.buffer, data]) : data;
 
-            lines
-                .filter(m => m.length > 0)
-                .forEach(async (m) => {
-                    try {
-                        await this.handleMessage(m);
-                    } catch (e) {
-                        await this.socket.end();
-                        console.error(e);
+            let start = 0;
+            for (let i = 0; i < this.buffer.length; i++) {
+                if (this.buffer[i] === StratumV1Client.NEWLINE) {
+                    if (i > start) {
+                        const line = this.buffer.toString('utf8', start, i);
+                        // fire-and-forget with error handling
+                        this.handleMessage(line).catch(async (e) => {
+                            await this.socket.end();
+                            console.error(e);
+                        });
                     }
-                });
+                    start = i + 1;
+                }
+            }
+
+            // Keep remaining bytes in buffer
+            if (start >= this.buffer.length) {
+                this.buffer = Buffer.alloc(0);
+            } else if (start > 0) {
+                this.buffer = this.buffer.subarray(start);
+            }
+            // If start === 0, no newline found, keep entire buffer
         });
 
 
@@ -147,7 +159,6 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
-                        console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
@@ -410,38 +421,20 @@ export class StratumV1Client {
             ];
         }
 
-        const networkConfig = this.configService.get('NETWORK');
-        let network;
+        // Get or create a SharedMiningJob for this payout set + template (cached)
+        const sharedJob = this.stratumV1JobsService.getOrCreateSharedJob(payoutInformation, jobTemplate);
 
-        if (networkConfig === 'mainnet') {
-            network = bitcoinjs.networks.bitcoin;
-        } else if (networkConfig === 'testnet') {
-            network = bitcoinjs.networks.testnet;
-        } else if (networkConfig === 'regtest') {
-            network = bitcoinjs.networks.regtest;
-        } else {
-            throw new Error('Invalid network configuration');
-        }
+        // Create a lightweight per-miner job reference
+        const jobId = this.stratumV1JobsService.getNextId();
+        const payoutKey = payoutInformation.map(p => `${p.address}:${p.percent}`).join('|');
+        const ref = new MinerJobRef(jobId, jobTemplate.blockData.id, payoutKey);
+        this.stratumV1JobsService.addMinerJobRef(ref);
 
-        const job = new MiningJob(
-            this.configService,
-            network,
-            this.stratumV1JobsService.getNextId(),
-            payoutInformation,
-            jobTemplate
-        );
-
-        this.stratumV1JobsService.addJob(job);
-
-
-        const success = await this.write(job.response(jobTemplate));
+        // Use pre-serialized notify payload with only the jobId spliced in
+        const success = await this.write(sharedJob.getNotifyPayload(jobId));
         if (!success) {
             return;
         }
-
-
-        //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.extraNonceAndSessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
-
     }
 
 
@@ -473,6 +466,7 @@ export class StratumV1Client {
 
         const submissionHash = submission.hash();
         if(this.miningSubmissionHashes.has(submissionHash)){
+            WorkerStats.getInstance().onShareDuplicate();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -486,24 +480,50 @@ export class StratumV1Client {
             this.miningSubmissionHashes.add(submissionHash);
         }
 
-        const job = this.stratumV1JobsService.getJobById(submission.jobId);
+        const ref = this.stratumV1JobsService.getJobById(submission.jobId);
 
         // a miner may submit a job that doesn't exist anymore if it was removed by a new block notification (or expired, 5 min)
-        if (job == null) {
+        if (ref == null) {
+            WorkerStats.getInstance().onJobNotFound();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
                 'Job not found').response();
-            //console.log(err);
             const success = await this.write(err);
             if (!success) {
                 return false;
             }
             return false;
         }
-        const jobTemplate = this.stratumV1JobsService.getJobTemplateById(job.jobTemplateId);
 
-        const updatedJobBlock = job.copyAndUpdateBlock(
+        const jobTemplate = this.stratumV1JobsService.getJobTemplateById(ref.jobTemplateId);
+        if (jobTemplate == null) {
+            const err = new StratumErrorMessage(
+                submission.id,
+                eStratumErrorCode.JobNotFound,
+                'Job template not found').response();
+            const success = await this.write(err);
+            if (!success) {
+                return false;
+            }
+            return false;
+        }
+
+        const sharedJob = this.stratumV1JobsService.getSharedJobForMinerRef(ref);
+        if (sharedJob == null) {
+            const err = new StratumErrorMessage(
+                submission.id,
+                eStratumErrorCode.JobNotFound,
+                'Shared job not found').response();
+            const success = await this.write(err);
+            if (!success) {
+                return false;
+            }
+            return false;
+        }
+
+        // Fast path: build only the 80-byte header for difficulty check (no block clone)
+        const header = sharedJob.buildHeaderBuffer(
             jobTemplate,
             parseInt(submission.versionMask, 16),
             parseInt(submission.nonce, 16),
@@ -511,17 +531,26 @@ export class StratumV1Client {
             submission.extraNonce2,
             parseInt(submission.ntime, 16)
         );
-        const header = updatedJobBlock.toBuffer(true);
         const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
-
-        //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.extraNonceAndSessionId}`);
 
 
         if (submissionDifficulty >= this.sessionDifficulty) {
 
+            WorkerStats.getInstance().onShareAccepted();
+
             if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+                WorkerStats.getInstance().onBlockFound();
                 console.log('!!! BLOCK FOUND !!!');
-                const blockHex = updatedJobBlock.toHex(false);
+                // Only build full block when we actually found a block (rare path)
+                const fullBlock = sharedJob.buildFullBlock(
+                    jobTemplate,
+                    parseInt(submission.versionMask, 16),
+                    parseInt(submission.nonce, 16),
+                    this.extraNonceAndSessionId,
+                    submission.extraNonce2,
+                    parseInt(submission.ntime, 16)
+                );
+                const blockHex = fullBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
                 await this.blocksService.save({
                     height: jobTemplate.blockData.height,
@@ -531,7 +560,7 @@ export class StratumV1Client {
                     blockData: blockHex
                 });
 
-                await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
+                await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, fullBlock, result);
                 //success
                 if (result == null) {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
@@ -573,6 +602,7 @@ export class StratumV1Client {
             }
 
         } else {
+            WorkerStats.getInstance().onShareRejected();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

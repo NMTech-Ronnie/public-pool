@@ -7,6 +7,7 @@ import { AddressSettingsService } from '../ORM/address-settings/address-settings
 import { BlocksService } from '../ORM/blocks/blocks.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
+import { WorkerStats } from '../utils/worker-stats';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
 import { NotificationService } from './notification.service';
 import { StratumV1JobsService } from './stratum-v1-jobs.service';
@@ -42,11 +43,16 @@ export class StratumV1Service implements OnModuleInit {
   }
 
   private startSocketServer() {
+    const stats = WorkerStats.getInstance();
+    stats.start();
+
     const server = net.createServer({ keepAlive: true }, (socket: net.Socket) => {
 
       //5 min
       socket.setTimeout(1000 * 60 * 5);
       socket.setNoDelay(true);
+
+      stats.onConnect();
 
       const client = new StratumV1Client(
         socket,
@@ -63,23 +69,20 @@ export class StratumV1Service implements OnModuleInit {
 
 
       socket.on('close', async (hadError: boolean) => {
+        stats.onDisconnect();
         if (client.extraNonceAndSessionId != null) {
           // Handle socket disconnection
           await client.destroy();
-          console.log(`Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`);
         }
       });
 
       socket.on('timeout', () => {
-        console.log('socket timeout');
+        stats.onTimeout();
         socket.end();
         socket.destroy();
       });
 
       socket.on('error', async (error: Error) => { });
-
-      //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
-
 
     });
 

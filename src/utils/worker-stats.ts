@@ -45,7 +45,7 @@ export class WorkerStats {
     }
 
     public onConnect() { this.connects++; this.activeClients++; }
-    public onDisconnect() { this.disconnects++; this.activeClients--; }
+    public onDisconnect() { this.disconnects++; if (this.activeClients > 0) this.activeClients--; }
     public onTimeout() { this.timeouts++; }
     public onShareAccepted() { this.sharesAccepted++; }
     public onShareRejected() { this.sharesRejected++; }

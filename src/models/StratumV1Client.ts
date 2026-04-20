@@ -54,6 +54,7 @@ export class StratumV1Client {
 
     private buffer: Buffer = Buffer.alloc(0);
     private static readonly NEWLINE = 0x0a; // '\n'
+    private static readonly MAX_BUFFER_BYTES = 64 * 1024; // 64 KiB hard cap on a single line
 
     private miningSubmissionHashes = new Set<string>()
 
@@ -74,6 +75,12 @@ export class StratumV1Client {
             // Buffer-based newline scanning — avoid string concat GC pressure
             this.buffer = this.buffer.length > 0 ? Buffer.concat([this.buffer, data]) : data;
 
+            // H3: hard cap. A well-behaved Stratum client never sends > a few KB per line.
+            if (this.buffer.length > StratumV1Client.MAX_BUFFER_BYTES) {
+                this.socket.destroy();
+                return;
+            }
+
             let start = 0;
             for (let i = 0; i < this.buffer.length; i++) {
                 if (this.buffer[i] === StratumV1Client.NEWLINE) {
@@ -89,13 +96,17 @@ export class StratumV1Client {
                 }
             }
 
-            // Keep remaining bytes in buffer
-            if (start >= this.buffer.length) {
+            // H2: avoid retaining the full underlying ArrayBuffer for tiny tails.
+            const tail = this.buffer.length - start;
+            if (tail === 0) {
                 this.buffer = Buffer.alloc(0);
             } else if (start > 0) {
-                this.buffer = this.buffer.subarray(start);
+                // For small leftovers, copy so we release the larger backing buffer.
+                this.buffer = tail < 1024
+                    ? Buffer.from(this.buffer.subarray(start))
+                    : this.buffer.subarray(start);
             }
-            // If start === 0, no newline found, keep entire buffer
+            // If start === 0, no newline found, keep entire buffer (already <= MAX_BUFFER_BYTES)
         });
 
 
@@ -401,37 +412,27 @@ export class StratumV1Client {
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
 
-        let payoutInformation;
-        const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-        //50Th/s
+        // Recompute noFee per job (hashRate may have changed)
         this.noFee = false;
         if (this.entity) {
             this.hashRate = this.statistics.hashRate;
+            // 50 Th/s threshold
             this.noFee = this.hashRate != 0 && this.hashRate < 50000000000000;
         }
-        if (this.noFee || devFeeAddress == null || devFeeAddress.length < 1) {
-            payoutInformation = [
-                { address: this.clientAuthorization.address, percent: 100 }
-            ];
 
-        } else {
-            payoutInformation = [
-                { address: devFeeAddress, percent: 1.5 },
-                { address: this.clientAuthorization.address, percent: 98.5 }
-            ];
-        }
+        // Cached, address-keyed shared job (multiple ASICs on same address share)
+        const sharedJob = this.stratumV1JobsService.getOrCreateSharedJob(
+            this.clientAuthorization.address,
+            this.noFee,
+            jobTemplate
+        );
 
-        // Get or create a SharedMiningJob for this payout set + template (cached)
-        const sharedJob = this.stratumV1JobsService.getOrCreateSharedJob(payoutInformation, jobTemplate);
-
-        // Create a lightweight per-miner job reference
+        // Lightweight per-miner job reference holding a direct pointer (no map scan on submit)
         const jobId = this.stratumV1JobsService.getNextId();
-        const payoutKey = payoutInformation.map(p => `${p.address}:${p.percent}`).join('|');
-        const ref = new MinerJobRef(jobId, jobTemplate.blockData.id, payoutKey);
+        const ref = new MinerJobRef(jobId, sharedJob);
         this.stratumV1JobsService.addMinerJobRef(ref);
 
-        // Use pre-serialized notify payload with only the jobId spliced in
-        const success = await this.write(sharedJob.getNotifyPayload(jobId));
+        const success = await this.write(sharedJob.getNotifyPayload(jobId, jobTemplate.blockData.clearJobs));
         if (!success) {
             return;
         }
@@ -496,25 +497,13 @@ export class StratumV1Client {
             return false;
         }
 
-        const jobTemplate = this.stratumV1JobsService.getJobTemplateById(ref.jobTemplateId);
+        const sharedJob = ref.sharedJob;
+        const jobTemplate = this.stratumV1JobsService.getJobTemplateById(sharedJob.jobTemplateId);
         if (jobTemplate == null) {
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
                 'Job template not found').response();
-            const success = await this.write(err);
-            if (!success) {
-                return false;
-            }
-            return false;
-        }
-
-        const sharedJob = this.stratumV1JobsService.getSharedJobForMinerRef(ref);
-        if (sharedJob == null) {
-            const err = new StratumErrorMessage(
-                submission.id,
-                eStratumErrorCode.JobNotFound,
-                'Shared job not found').response();
             const success = await this.write(err);
             if (!success) {
                 return false;

@@ -28,9 +28,10 @@ export class SharedMiningJob {
     public readonly jobTemplateId: string;
     public readonly creation: number;
 
-    /** Pre-serialized notify payload (without jobId placeholder filled) */
-    private cachedNotifyPrefix: string;
-    private cachedNotifySuffix: string;
+    /** Pre-serialized notify payload with placeholders for jobId and clearJobs */
+    private cachedNotifyPrefix: string;   // up to and including `"params":[`
+    private cachedNotifyMiddle: string;   // between jobId and clearJobs
+    private cachedNotifySuffix: string;   // after clearJobs through `]}\n`
 
     constructor(
         configService: ConfigService,
@@ -84,13 +85,12 @@ export class SharedMiningJob {
 
     private buildCachedNotify() {
         const jt = this.jobTemplate;
-        // Build the full params array except jobId (index 0)
-        // We serialize everything once. Per-miner we only splice in the jobId.
+        // Use unique placeholders for jobId and clearJobs so we can splice both in per call.
         const notify: IMiningNotify = {
             id: null,
             method: eResponseMethod.MINING_NOTIFY,
             params: [
-                '__JOB_ID__', // placeholder
+                '__JOB_ID__',
                 this.swapEndianWords(jt.block.prevHash).toString('hex'),
                 this.coinbasePart1,
                 this.coinbasePart2,
@@ -98,21 +98,31 @@ export class SharedMiningJob {
                 jt.block.version.toString(16),
                 jt.block.bits.toString(16),
                 jt.block.timestamp.toString(16),
-                jt.blockData.clearJobs
+                // boolean placeholder — JSON.stringify keeps it as the literal string here
+                ('__CLEAR__' as unknown) as boolean
             ]
         };
         const full = JSON.stringify(notify);
-        const placeholderIdx = full.indexOf('"__JOB_ID__"');
-        this.cachedNotifyPrefix = full.substring(0, placeholderIdx);
-        this.cachedNotifySuffix = full.substring(placeholderIdx + '"__JOB_ID__"'.length);
+        const jobIdToken = '"__JOB_ID__"';
+        const clearToken = '"__CLEAR__"';
+        const i1 = full.indexOf(jobIdToken);
+        const i2 = full.indexOf(clearToken);
+        this.cachedNotifyPrefix = full.substring(0, i1);
+        this.cachedNotifyMiddle = full.substring(i1 + jobIdToken.length, i2);
+        this.cachedNotifySuffix = full.substring(i2 + clearToken.length);
     }
 
     /**
-     * Get the per-miner notify string. Only the jobId differs.
-     * Avoids re-serializing the entire payload per miner.
+     * Get the per-miner notify string. jobId and clearJobs are spliced in per call,
+     * so callers can drive a `clearJobs:true` notify without invalidating the cache.
      */
-    public getNotifyPayload(jobId: string): string {
-        return this.cachedNotifyPrefix + '"' + jobId + '"' + this.cachedNotifySuffix + '\n';
+    public getNotifyPayload(jobId: string, clearJobs: boolean): string {
+        return this.cachedNotifyPrefix
+            + '"' + jobId + '"'
+            + this.cachedNotifyMiddle
+            + (clearJobs ? 'true' : 'false')
+            + this.cachedNotifySuffix
+            + '\n';
     }
 
     /**
@@ -260,15 +270,14 @@ export class SharedMiningJob {
 
 
 /**
- * Lightweight per-miner job reference. Only stores the jobId and a pointer
- * to the shared template + the payout key.
+ * Lightweight per-miner job reference. Holds a direct pointer to the SharedMiningJob
+ * so share validation needs no map lookup.
  */
 export class MinerJobRef {
     public readonly creation: number;
     constructor(
         public readonly jobId: string,
-        public readonly jobTemplateId: string,
-        public readonly payoutKey: string, // 'fee' or 'noFee'
+        public readonly sharedJob: SharedMiningJob,
     ) {
         this.creation = Date.now();
     }

@@ -15,14 +15,24 @@ const NUM_WORKERS = parseInt(process.env.CLUSTER_WORKERS || '0', 10) || Math.max
 if (cluster.isPrimary) {
   console.log(`Primary ${process.pid} starting ${NUM_WORKERS} workers`);
 
+  // Track instance id per worker so restarts preserve NODE_APP_INSTANCE.
+  // worker.process.env does NOT contain the env passed to fork(), so we must remember it ourselves.
+  const workerInstance = new Map<number, string>();
+
+  const spawnWorker = (instanceId: string) => {
+    const w = cluster.fork({ NODE_APP_INSTANCE: instanceId });
+    workerInstance.set(w.id, instanceId);
+  };
+
   for (let i = 0; i < NUM_WORKERS; i++) {
-    cluster.fork({ NODE_APP_INSTANCE: String(i) });
+    spawnWorker(String(i));
   }
 
   cluster.on('exit', (worker, code, signal) => {
-    console.log(`Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Restarting...`);
-    const instanceId = (worker as any).process.env?.NODE_APP_INSTANCE ?? '0';
-    cluster.fork({ NODE_APP_INSTANCE: instanceId });
+    const instanceId = workerInstance.get(worker.id) ?? '0';
+    workerInstance.delete(worker.id);
+    console.log(`Worker ${worker.process.pid} (instance=${instanceId}) exited (code=${code}, signal=${signal}). Restarting...`);
+    spawnWorker(instanceId);
   });
 
 } else {

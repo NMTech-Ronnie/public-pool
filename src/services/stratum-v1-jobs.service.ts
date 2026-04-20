@@ -35,7 +35,11 @@ export class StratumV1JobsService {
     /** Per-miner job refs (lightweight) */
     public jobs: { [jobId: string]: MinerJobRef } = {};
 
-    /** Shared job templates indexed by payoutKey:templateId */
+    /**
+     * Shared job templates. Cache key is `${minerAddress}|${noFee?'1':'0'}::${templateId}`.
+     * This means N ASIC miners pointing to the same address share ONE SharedMiningJob
+     * per template, which is the realistic sharing case.
+     */
     public sharedJobs: { [key: string]: SharedMiningJob } = {};
 
     public blocks: { [id: number]: IJobTemplate } = {};
@@ -157,63 +161,53 @@ export class StratumV1JobsService {
                     this.sharedJobs = {};
                 }else{
                     const now = new Date().getTime();
-                    // Delete old templates (5 minutes)
-                    for(const templateId in this.blocks){
-                        if(now - this.blocks[templateId].blockData.creation  > (1000 * 60 * 5)){
+                    // H1 fix: shared jobs / templates live LONGER than per-miner refs,
+                    // so a late-arriving share whose ref still exists can always resolve
+                    // its template + sharedJob. Refs expire at 5 min, blocks/sharedJobs at 7 min.
+                    const REF_TTL = 1000 * 60 * 5;
+                    const TEMPLATE_TTL = 1000 * 60 * 7;
+                    for (const templateId in this.blocks) {
+                        if (now - this.blocks[templateId].blockData.creation > TEMPLATE_TTL) {
                             delete this.blocks[templateId];
                         }
                     }
-                    // Delete old jobs (5 minutes)
                     for (const jobId in this.jobs) {
-                        if(now - this.jobs[jobId].creation > (1000 * 60 * 5)){
+                        if (now - this.jobs[jobId].creation > REF_TTL) {
                             delete this.jobs[jobId];
                         }
                     }
-                    // Delete old shared jobs (5 minutes)
                     for (const key in this.sharedJobs) {
-                        if(now - this.sharedJobs[key].creation > (1000 * 60 * 5)){
+                        if (now - this.sharedJobs[key].creation > TEMPLATE_TTL) {
                             delete this.sharedJobs[key];
                         }
                     }
                 }
                 this.blocks[data.blockData.id] = data;
-
-                // Pre-generate shared jobs for fee and noFee payout sets
-                this.preGenerateSharedJobs(data);
             }),
             shareReplay({ refCount: true, bufferSize: 1 })
         )
     }
 
     /**
-     * Pre-generate SharedMiningJob instances for both fee and noFee payout sets.
-     * These are shared across all miners subscribing to this template.
-     */
-    private preGenerateSharedJobs(jobTemplate: IJobTemplate) {
-        // noFee payout — placeholder address, real address filled per miner
-        // We can't pre-generate per-address templates, but we CAN pre-generate
-        // the two variants: with dev fee and without dev fee.
-        // Since the actual miner address varies, we still need per-miner jobs
-        // UNLESS all miners share the same coinbase structure.
-        //
-        // For now, shared jobs are created on-demand per (payoutKey, templateId)
-        // in getOrCreateSharedJob(). The pre-generation here is a no-op placeholder.
-    }
-
-    /**
-     * Get or create a SharedMiningJob for the given payout set and template.
-     * Returns a cached instance if one already exists.
+     * Get or create a SharedMiningJob for the given miner address + payout variant.
+     * Cache key uses ONLY the miner address + noFee flag, so multiple ASICs from
+     * the same wallet share the same cached coinbase + notify payload.
      */
     public getOrCreateSharedJob(
-        payoutInformation: { address: string; percent: number }[],
+        minerAddress: string,
+        noFee: boolean,
         jobTemplate: IJobTemplate
     ): SharedMiningJob {
-        // Build a stable cache key from payout addresses + template id
-        const payoutKey = payoutInformation.map(p => `${p.address}:${p.percent}`).join('|');
-        const cacheKey = `${payoutKey}::${jobTemplate.blockData.id}`;
+        const cacheKey = `${minerAddress}|${noFee ? '1' : '0'}::${jobTemplate.blockData.id}`;
 
         let shared = this.sharedJobs[cacheKey];
         if (!shared) {
+            const payoutInformation = (noFee || !this.devFeeAddress)
+                ? [{ address: minerAddress, percent: 100 }]
+                : [
+                    { address: this.devFeeAddress, percent: 1.5 },
+                    { address: minerAddress, percent: 98.5 }
+                ];
             shared = new SharedMiningJob(
                 this.configService,
                 this.network,
@@ -254,39 +248,6 @@ export class StratumV1JobsService {
 
     public getJobById(jobId: string): MinerJobRef | undefined {
         return this.jobs[jobId];
-    }
-
-    public getSharedJobByKey(payoutKey: string, templateId: string): SharedMiningJob | undefined {
-        // We need to find the shared job that matches this payout key and template
-        for (const key in this.sharedJobs) {
-            if (key.startsWith(payoutKey + '::') && key.endsWith('::' + templateId)) {
-                return this.sharedJobs[key];
-            }
-        }
-        // Fallback: search by templateId in all shared jobs
-        for (const key in this.sharedJobs) {
-            const shared = this.sharedJobs[key];
-            if (shared.jobTemplateId === templateId) {
-                // Check if payoutKey matches
-                if (key.startsWith(payoutKey + '::')) {
-                    return shared;
-                }
-            }
-        }
-        return undefined;
-    }
-
-    /**
-     * Find the SharedMiningJob that was used for a given MinerJobRef
-     */
-    public getSharedJobForMinerRef(ref: MinerJobRef): SharedMiningJob | undefined {
-        for (const key in this.sharedJobs) {
-            const shared = this.sharedJobs[key];
-            if (shared.jobTemplateId === ref.jobTemplateId && key.startsWith(ref.payoutKey + '::')) {
-                return shared;
-            }
-        }
-        return undefined;
     }
 
     public getNextTemplateId() {

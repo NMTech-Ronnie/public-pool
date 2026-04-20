@@ -1,3 +1,5 @@
+import cluster from 'node:cluster';
+import { availableParallelism } from 'node:os';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -7,6 +9,27 @@ import { readFileSync } from 'fs';
 import * as ecc from 'tiny-secp256k1';
 
 import { AppModule } from './app.module';
+
+const NUM_WORKERS = parseInt(process.env.CLUSTER_WORKERS || '0', 10) || Math.max(availableParallelism() - 1, 1);
+
+if (cluster.isPrimary) {
+  console.log(`Primary ${process.pid} starting ${NUM_WORKERS} workers`);
+
+  for (let i = 0; i < NUM_WORKERS; i++) {
+    cluster.fork({ NODE_APP_INSTANCE: String(i) });
+  }
+
+  cluster.on('exit', (worker, code, signal) => {
+    console.log(`Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Restarting...`);
+    const instanceId = (worker as any).process.env?.NODE_APP_INSTANCE ?? '0';
+    cluster.fork({ NODE_APP_INSTANCE: instanceId });
+  });
+
+} else {
+  // Each worker gets its instance id via env
+  process.env.NODE_APP_INSTANCE = process.env.NODE_APP_INSTANCE ?? '0';
+  bootstrap();
+}
 
 async function bootstrap() {
 
@@ -39,12 +62,12 @@ async function bootstrap() {
   );
 
   process.on('SIGINT', () => {
-    console.log(`Stopping services`);
+    console.log(`[Worker ${process.env.NODE_APP_INSTANCE}] Stopping services`);
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
-    console.log(`Stopping services`);
+    console.log(`[Worker ${process.env.NODE_APP_INSTANCE}] Stopping services`);
     process.exit(0);
   });
 
@@ -54,10 +77,8 @@ async function bootstrap() {
   //Taproot
   bitcoinjs.initEccLib(ecc);
 
-  await app.listen(process.env.API_PORT, '0.0.0.0', (err, address) => {
-    console.log(`API listening on ${address}`);
-  });
+  const port = parseInt(process.env.API_PORT, 10);
+  await app.listen(port, '0.0.0.0');
+  console.log(`[Worker ${process.env.NODE_APP_INSTANCE}] API listening on 0.0.0.0:${port}`);
 
 }
-
-bootstrap();

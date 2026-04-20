@@ -5,8 +5,8 @@ import { TrackedEntity } from '../utils/TrackedEntity.entity';
 @Entity()
 //Index for getHashRateForSession
 @Index(["address", "clientName", "sessionId"])
-//Index for statistics save
-@Index(["address", "clientName", "sessionId", "time"])
+//Index for statistics save + upsert ON CONFLICT
+@Index(["address", "clientName", "sessionId", "time"], { unique: true })
 export class ClientStatisticsEntity extends TrackedEntity {
 
     @PrimaryGeneratedColumn()
@@ -22,10 +22,10 @@ export class ClientStatisticsEntity extends TrackedEntity {
     sessionId: string;
 
     @Index()
-    @Column({ type: 'integer' })
+    @Column({ type: 'bigint' })
     time: number;
 
-    @Column({ type: 'real' })
+    @Column({ type: 'double precision' })
     shares: number;
 
     @Column({ default: 0, type: 'integer' })

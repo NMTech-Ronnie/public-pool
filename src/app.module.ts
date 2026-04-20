@@ -42,14 +42,18 @@ const ORMModules = [
     imports: [
         ConfigModule.forRoot(),
         TypeOrmModule.forRoot({
-            type: 'sqlite',
-            database: './DB/public-pool.sqlite',
+            type: 'postgres',
+            host: process.env.POSTGRES_HOST || 'localhost',
+            port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
+            username: process.env.POSTGRES_USER || 'publicpool',
+            password: process.env.POSTGRES_PASSWORD || 'publicpool',
+            database: process.env.POSTGRES_DB || 'publicpool',
             synchronize: true,
             autoLoadEntities: true,
             logging: false,
-            enableWAL: true,
-            busyTimeout: 30 * 1000,
-
+            extra: {
+                max: parseInt(process.env.POSTGRES_POOL_MAX || '20', 10),
+            },
         }),
         CacheModule.register(),
         ScheduleModule.forRoot(),

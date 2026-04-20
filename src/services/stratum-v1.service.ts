@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Server, Socket } from 'net';
+import * as net from 'net';
 
 import { StratumV1Client } from '../models/StratumV1Client';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
@@ -42,10 +42,11 @@ export class StratumV1Service implements OnModuleInit {
   }
 
   private startSocketServer() {
-    const server = new Server(async (socket: Socket) => {
+    const server = net.createServer({ keepAlive: true }, (socket: net.Socket) => {
 
       //5 min
       socket.setTimeout(1000 * 60 * 5);
+      socket.setNoDelay(true);
 
       const client = new StratumV1Client(
         socket,
@@ -82,8 +83,10 @@ export class StratumV1Service implements OnModuleInit {
 
     });
 
-    server.listen(process.env.STRATUM_PORT, () => {
-      console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
+    const port = parseInt(process.env.STRATUM_PORT, 10);
+    // Use SO_REUSEPORT so multiple cluster workers can listen on the same port
+    server.listen({ port, host: '0.0.0.0', reusePort: true }, () => {
+      console.log(`[Worker ${process.env.NODE_APP_INSTANCE}] Stratum server is listening on port ${port}`);
     });
 
   }

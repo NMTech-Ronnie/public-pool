@@ -16,6 +16,7 @@ import { ClientEntity } from '../ORM/client/client.entity';
 import { ClientModule } from '../ORM/client/client.module';
 import { ClientService } from '../ORM/client/client.service';
 import { BitcoinRpcService as MockBitcoinRpcService } from '../services/bitcoin-rpc.service';
+import { ExternalSharesService } from '../services/external-shares.service';
 import { NotificationService } from '../services/notification.service';
 import { StratumV1JobsService } from '../services/stratum-v1-jobs.service';
 import { IMiningInfo } from './bitcoin-rpc/IMiningInfo';
@@ -140,7 +141,8 @@ describe('StratumV1Client', () => {
             notificationService,
             blocksService,
             configService,
-            addressSettings
+            addressSettings,
+            {} as ExternalSharesService
         );
 
         client.extraNonceAndSessionId = MockRecording1.EXTRA_NONCE;

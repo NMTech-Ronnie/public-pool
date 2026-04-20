@@ -542,7 +542,7 @@ export class StratumV1Client {
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
-                    await this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
+                    this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
                     this.entity.updatedAt = now;
                 }
 
@@ -551,7 +551,7 @@ export class StratumV1Client {
             }
 
             if (submissionDifficulty > this.entity.bestDifficulty) {
-                await this.clientService.updateBestDifficulty(this.extraNonceAndSessionId, submissionDifficulty);
+                this.clientService.updateBestDifficulty(this.extraNonceAndSessionId, submissionDifficulty);
                 this.entity.bestDifficulty = submissionDifficulty;
                 if (submissionDifficulty > (await this.addressSettingsService.getSettings(this.clientAuthorization.address, true)).bestDifficulty) {
                     await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);

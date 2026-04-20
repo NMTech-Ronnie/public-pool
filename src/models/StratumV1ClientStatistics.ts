@@ -118,6 +118,10 @@ export class StratumV1ClientStatistics {
 
     public getSuggestedDifficulty(clientDifficulty: number) {
 
+        if (!Number.isFinite(clientDifficulty) || clientDifficulty <= 0) {
+            return null;
+        }
+
         // miner hasn't submitted shares in one minute
         if (this.submissionCache.length < 5) {
             if ((new Date().getTime() - this.submissionCacheStart.getTime()) / 1000 > 60) {
@@ -133,9 +137,21 @@ export class StratumV1ClientStatistics {
         }, 0);
         const diffSeconds = (this.submissionCache[this.submissionCache.length - 1].time.getTime() - this.submissionCache[0].time.getTime()) / 1000;
 
+        if (!Number.isFinite(sum) || !Number.isFinite(diffSeconds) || diffSeconds <= 0) {
+            return null;
+        }
+
         const difficultyPerSecond = sum / diffSeconds;
 
+        if (!Number.isFinite(difficultyPerSecond) || difficultyPerSecond <= 0) {
+            return null;
+        }
+
         const targetDifficulty = difficultyPerSecond * TARGET_SUBMISSION_PER_SECOND;
+
+        if (!Number.isFinite(targetDifficulty) || targetDifficulty <= 0) {
+            return null;
+        }
 
         if ((clientDifficulty * 2) < targetDifficulty || (clientDifficulty / 2) > targetDifficulty) {
             return this.nearestPowerOfTwo(targetDifficulty)
@@ -144,27 +160,19 @@ export class StratumV1ClientStatistics {
         return null;
     }
 
-    private nearestPowerOfTwo(val): number {
-        if (val === 0) {
+    private nearestPowerOfTwo(val: number): number {
+        if (!Number.isFinite(val) || val <= 0) {
             return null;
         }
+
         if (val < MIN_DIFF) {
             return MIN_DIFF;
         }
-        let x = val | (val >> 1);
-        x = x | (x >> 2);
-        x = x | (x >> 4);
-        x = x | (x >> 8);
-        x = x | (x >> 16);
-        x = x | (x >> 32);
-        const res = x - (x >> 1);
-        if (res == 0 && val * 100 < MIN_DIFF) {
-            return MIN_DIFF;
-        }
-        if (res == 0) {
-            return this.nearestPowerOfTwo(val * 100) / 100;
-        }
-        return res;
+
+        // Works for both integer and fractional difficulties and avoids recursion/bitwise overflow.
+        const exponent = Math.floor(Math.log2(val));
+        const nearest = Math.pow(2, exponent);
+        return nearest < MIN_DIFF ? MIN_DIFF : nearest;
     }
 
 }

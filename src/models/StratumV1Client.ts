@@ -31,6 +31,15 @@ import { WorkerStats } from '../utils/worker-stats';
 
 
 export class StratumV1Client {
+    private static readonly QUIET_SOCKET_ERROR_CODES = new Set([
+        'EPIPE',
+        'ECONNRESET',
+        'ERR_STREAM_DESTROYED',
+        'ETIMEDOUT',
+        'EHOSTUNREACH',
+        'ENETUNREACH',
+        'ECANCELED',
+    ]);
 
     private clientSubscription: SubscriptionMessage;
     private clientConfiguration: ConfigurationMessage;
@@ -59,6 +68,10 @@ export class StratumV1Client {
     private miningSubmissionHashes = new Set<string>()
     private destroyed = false;
 
+    private isQuietSocketError(error?: NodeJS.ErrnoException): boolean {
+        return !!error?.code && StratumV1Client.QUIET_SOCKET_ERROR_CODES.has(error.code);
+    }
+
     constructor(
         public readonly socket: Socket,
         private readonly stratumV1JobsService: StratumV1JobsService,
@@ -78,8 +91,8 @@ export class StratumV1Client {
 
         this.socket.on('error', (error: NodeJS.ErrnoException) => {
             WorkerStats.getInstance().onSocketWriteError(error?.code);
-            // Ignore common disconnect noise from internet clients.
-            if (error?.code !== 'EPIPE' && error?.code !== 'ECONNRESET') {
+            // Common internet disconnect/no-route/timeouts are aggregated in WorkerStats.
+            if (!this.isQuietSocketError(error)) {
                 console.error(`Socket error: ${this.extraNonceAndSessionId ?? 'unknown'}`, error.message);
             }
             this.destroy().catch(() => undefined);
@@ -678,7 +691,7 @@ export class StratumV1Client {
             }
             const err = error as NodeJS.ErrnoException;
             WorkerStats.getInstance().onSocketWriteError(err?.code);
-            if (err?.code !== 'EPIPE' && err?.code !== 'ECONNRESET' && err?.code !== 'ERR_STREAM_DESTROYED') {
+            if (!this.isQuietSocketError(err)) {
                 console.error(`Error occurred while writing to socket: ${this.extraNonceAndSessionId}`, err);
             }
             return false;

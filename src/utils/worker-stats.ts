@@ -17,6 +17,9 @@ export class WorkerStats {
     private socketClosedWrites = 0;
     private socketWriteErrors = 0;
     private socketResets = 0;
+    private socketTimeouts = 0;
+    private socketUnreachable = 0;
+    private socketCanceled = 0;
     private heartbeatFlushErrors = 0;
     private statsFlushErrors = 0;
     private activeClients = 0;
@@ -61,6 +64,12 @@ export class WorkerStats {
     public onSocketWriteError(code?: string) {
         if (code === 'EPIPE' || code === 'ECONNRESET' || code === 'ERR_STREAM_DESTROYED') {
             this.socketResets++;
+        } else if (code === 'ETIMEDOUT') {
+            this.socketTimeouts++;
+        } else if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') {
+            this.socketUnreachable++;
+        } else if (code === 'ECANCELED') {
+            this.socketCanceled++;
         } else {
             this.socketWriteErrors++;
         }
@@ -81,6 +90,9 @@ export class WorkerStats {
         if (this.timeouts > 0) parts.push(`tout=${this.timeouts}`);
         if (this.socketClosedWrites > 0) parts.push(`sockClosed=${this.socketClosedWrites}`);
         if (this.socketResets > 0) parts.push(`sockReset=${this.socketResets}`);
+        if (this.socketTimeouts > 0) parts.push(`sockTimeout=${this.socketTimeouts}`);
+        if (this.socketUnreachable > 0) parts.push(`sockUnreach=${this.socketUnreachable}`);
+        if (this.socketCanceled > 0) parts.push(`sockCancel=${this.socketCanceled}`);
         if (this.socketWriteErrors > 0) parts.push(`sockErr=${this.socketWriteErrors}`);
         if (this.heartbeatFlushErrors > 0) parts.push(`hbErr=${this.heartbeatFlushErrors}`);
         if (this.statsFlushErrors > 0) parts.push(`statErr=${this.statsFlushErrors}`);
@@ -100,6 +112,9 @@ export class WorkerStats {
         this.socketClosedWrites = 0;
         this.socketWriteErrors = 0;
         this.socketResets = 0;
+        this.socketTimeouts = 0;
+        this.socketUnreachable = 0;
+        this.socketCanceled = 0;
         this.heartbeatFlushErrors = 0;
         this.statsFlushErrors = 0;
     }

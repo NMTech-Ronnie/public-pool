@@ -14,4 +14,12 @@ export class RpcBlockEntity {
 
     @Column({ nullable: true, type: 'text' })
     data?: string;
+
+    /**
+     * Leader stores the fully-processed block template here after Merkle tree computation,
+     * coinbase construction, and job ID generation. Workers read this directly via
+     * getProcessedTemplate() to skip redundant CPU-heavy calculations.
+     */
+    @Column({ nullable: true, type: 'text' })
+    processedData?: string;
 }

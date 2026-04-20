@@ -1,24 +1,101 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 
+interface PendingStat {
+    key: string;
+    time: number;
+    shares: number;
+    acceptedCount: number;
+    address: string;
+    clientName: string;
+    sessionId: string;
+    createdAt: Date;
+}
 
 @Injectable()
-export class ClientStatisticsService {
+export class ClientStatisticsService implements OnModuleDestroy {
+
+    // In-memory queue for share statistics — eliminates synchronous DB blocking on stratum event loop
+    private pendingUpdates = new Map<string, PendingStat>();
 
     constructor(
-
-
         @InjectRepository(ClientStatisticsEntity)
         private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
     ) {
 
     }
 
-    public async update(clientStatistic: Partial<ClientStatisticsEntity>) {
+    /**
+     * Queue a share update for batch flushing. Call from stratum event loop — non-blocking.
+     */
+    public queueUpdate(stat: Partial<ClientStatisticsEntity>) {
+        const key = `${stat.address}:${stat.clientName}:${stat.sessionId}:${stat.time}`;
+        const existing = this.pendingUpdates.get(key);
+        if (existing) {
+            existing.shares += stat.shares || 0;
+            existing.acceptedCount += stat.acceptedCount || 0;
+        } else {
+            this.pendingUpdates.set(key, {
+                key,
+                time: stat.time,
+                shares: stat.shares || 0,
+                acceptedCount: stat.acceptedCount || 0,
+                address: stat.address,
+                clientName: stat.clientName,
+                sessionId: stat.sessionId,
+                createdAt: new Date(),
+            });
+        }
+    }
 
+    /**
+     * Flush all queued statistics to DB in a single batch every 5 seconds.
+     * Uses INSERT ... ON CONFLICT (upsert) for atomicity.
+     */
+    @Interval(5000)
+    public async flushUpdates() {
+        if (this.pendingUpdates.size === 0) return;
+
+        const batch = Array.from(this.pendingUpdates.values());
+        this.pendingUpdates.clear();
+
+        try {
+            // Build VALUES clause for bulk upsert
+            const values = batch.map((s, i) =>
+                `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`
+            ).join(', ');
+
+            const params: any[] = [];
+            batch.forEach(s => {
+                params.push(s.address, s.clientName, s.sessionId, s.time, s.shares, s.acceptedCount, s.createdAt);
+            });
+
+            await this.clientStatisticsRepository.query(`
+                INSERT INTO client_statistics_entity
+                    (address, "clientName", "sessionId", time, shares, "acceptedCount", "createdAt")
+                VALUES ${values}
+                ON CONFLICT (address, "clientName", "sessionId", time)
+                DO UPDATE SET
+                    shares = client_statistics_entity.shares + EXCLUDED.shares,
+                    "acceptedCount" = client_statistics_entity."acceptedCount" + EXCLUDED."acceptedCount",
+                    "updatedAt" = NOW()
+            `, params);
+        } catch (e: any) {
+            console.error('Batch flush client_statistics failed:', e?.message ?? String(e));
+            // Re-queue failed items to avoid data loss
+            batch.forEach(s => this.pendingUpdates.set(s.key, s));
+        }
+    }
+
+    async onModuleDestroy() {
+        await this.flushUpdates();
+    }
+
+    public async update(clientStatistic: Partial<ClientStatisticsEntity>) {
         await this.clientStatisticsRepository.update({
             address: clientStatistic.address,
             clientName: clientStatistic.clientName,
@@ -30,10 +107,9 @@ export class ClientStatisticsService {
                 acceptedCount: clientStatistic.acceptedCount,
                 updatedAt: new Date()
             });
-
     }
+
     public async insert(clientStatistic: Partial<ClientStatisticsEntity>) {
-        // If no rows were updated, insert a new record
         await this.clientStatisticsRepository.insert(clientStatistic);
     }
 
@@ -78,27 +154,6 @@ export class ClientStatisticsService {
 
     }
 
-
-    // public async getHashRateForAddress(address: string) {
-
-    //     const oneHour = new Date(new Date().getTime() - (60 * 60 * 1000));
-
-    //     const query = `
-    //         SELECT
-    //         SUM(entry.shares) AS difficultySum
-    //         FROM
-    //             client_statistics_entity AS entry
-    //         WHERE
-    //             entry.address = ? AND entry.time > ${oneHour}
-    //     `;
-
-    //     const result = await this.clientStatisticsRepository.query(query, [address]);
-
-    //     const difficultySum = result[0].difficultySum;
-
-    //     return (difficultySum * 4294967296) / (600);
-
-    // }
 
     public async getChartDataForAddress(address: string) {
 

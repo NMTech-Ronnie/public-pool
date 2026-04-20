@@ -49,8 +49,8 @@ async function bootstrap() {
     try {
       await dataSource.query("CREATE SEQUENCE IF NOT EXISTS job_id_seq START 1");
       await dataSource.query("CREATE SEQUENCE IF NOT EXISTS job_template_id_seq START 1");
-    } catch (e) {
-      console.error('Failed to create sequences:', e.message);
+    } catch (e: any) {
+      console.error('Failed to create sequences:', e?.message ?? String(e));
     }
   }
 

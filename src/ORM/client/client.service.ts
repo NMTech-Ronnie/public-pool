@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
@@ -9,11 +9,13 @@ import { ClientEntity } from './client.entity';
 
 
 @Injectable()
-export class ClientService {
+export class ClientService implements OnModuleDestroy {
 
 
     public insertQueue: { result: BehaviorSubject<ObjectLiteral | null>, partialClient: Partial<ClientEntity> }[] = [];
 
+    // Batch heartbeat queue — eliminates per-share synchronous DB UPDATE blocking
+    private heartbeatQueue = new Map<string, { hashRate: number; updatedAt: Date }>();
 
     constructor(
         @InjectRepository(ClientEntity)
@@ -24,6 +26,10 @@ export class ClientService {
 
     @Interval(1000 * 5)
     public async insertClients() {
+        if (this.insertQueue.length === 0) {
+            return;
+        }
+
         const queueCopy = [...this.insertQueue];
         this.insertQueue = [];
 
@@ -32,6 +38,71 @@ export class ClientService {
         queueCopy.forEach((c, index) => {
             c.result.next(results.generatedMaps[index]);
         });
+    }
+
+    /**
+     * Queue a heartbeat update for batch flushing. Non-blocking — safe to call from stratum event loop.
+     */
+    public queueHeartbeat(address: string, clientName: string, sessionId: string, hashRate: number, updatedAt: Date) {
+        const key = `${address}:${clientName}:${sessionId}`;
+        this.heartbeatQueue.set(key, { hashRate, updatedAt });
+    }
+
+    /**
+     * Flush all queued heartbeats to DB in a single batch every 30 seconds.
+     * Uses a single UPDATE per batch with CASE expressions for efficiency.
+     */
+    @Interval(30000)
+    public async flushHeartbeats() {
+        if (this.heartbeatQueue.size === 0) return;
+
+        const batch = Array.from(this.heartbeatQueue.entries());
+        this.heartbeatQueue.clear();
+
+        try {
+            // Build bulk UPDATE using unnest for PostgreSQL
+            const addresses: string[] = [];
+            const clientNames: string[] = [];
+            const sessionIds: string[] = [];
+            const hashRates: number[] = [];
+            const updatedAts: Date[] = [];
+
+            batch.forEach(([key, data]) => {
+                const [address, clientName, sessionId] = key.split(':');
+                addresses.push(address);
+                clientNames.push(clientName);
+                sessionIds.push(sessionId);
+                hashRates.push(data.hashRate);
+                updatedAts.push(data.updatedAt);
+            });
+
+            await this.clientRepository.query(`
+                UPDATE client_entity AS t
+                SET "hashRate" = v."hashRate",
+                    "updatedAt" = v."updatedAt",
+                    "deletedAt" = NULL
+                FROM (
+                    SELECT unnest($1::varchar[]) as address,
+                           unnest($2::varchar[]) as "clientName",
+                           unnest($3::varchar[]) as "sessionId",
+                           unnest($4::real[]) as "hashRate",
+                           unnest($5::timestamptz[]) as "updatedAt"
+                ) AS v(address, "clientName", "sessionId", "hashRate", "updatedAt")
+                WHERE t.address = v.address
+                  AND t."clientName" = v."clientName"
+                  AND t."sessionId" = v."sessionId"
+            `, [addresses, clientNames, sessionIds, hashRates, updatedAts]);
+        } catch (e: any) {
+            console.error('Batch heartbeat flush failed:', e?.message ?? String(e));
+            // Re-queue failed items
+            batch.forEach(([key, data]) => {
+                this.heartbeatQueue.set(key, data);
+            });
+        }
+    }
+
+    async onModuleDestroy() {
+        await this.flushHeartbeats();
     }
 
     public async killDeadClients() {

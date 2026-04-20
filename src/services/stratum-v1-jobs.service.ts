@@ -7,6 +7,7 @@ import { combineLatest, delay, filter, from, interval, map, Observable, shareRep
 import { MiningJob } from '../models/MiningJob';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
 import { JobIdService } from './job-id.service';
+import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
 
 export interface IJobTemplate {
 
@@ -39,6 +40,7 @@ export class StratumV1JobsService {
     constructor(
         private readonly bitcoinRpcService: BitcoinRpcService,
         private readonly jobIdService: JobIdService,
+        private readonly rpcBlockService: RpcBlockService,
     ) {
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(60000).pipe(delay(0), startWith(-1))]).pipe(
@@ -140,6 +142,10 @@ export class StratumV1JobsService {
                     }
                 }
                 this.blocks[data.blockData.id] = data;
+
+                // Store fully-processed template for workers to reuse (skips redundant Merkle tree computation)
+                this.rpcBlockService.saveProcessedTemplate(data.blockData.height, JSON.stringify(data))
+                    .catch(e => console.error('Failed to save processed template:', e));
             }),
             shareReplay({ refCount: true, bufferSize: 1 })
         )

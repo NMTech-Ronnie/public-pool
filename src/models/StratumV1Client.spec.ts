@@ -116,12 +116,14 @@ describe('StratumV1Client', () => {
 
         const chainStateService = { updateHeight: jest.fn(), getHeight: jest.fn() } as any;
         const leaderElectionService = { getIsLeader: jest.fn().mockReturnValue(true) } as any;
-        bitcoinRpcService = new MockBitcoinRpcService(configService, null, chainStateService, leaderElectionService);
+        const pgNotifyService = { whenReady: jest.fn().mockResolvedValue(undefined), listen: jest.fn().mockResolvedValue(undefined), unlisten: jest.fn().mockResolvedValue(undefined), notify: jest.fn().mockResolvedValue(undefined) } as any;
+        bitcoinRpcService = new MockBitcoinRpcService(configService, null, chainStateService, leaderElectionService, pgNotifyService);
         jest.spyOn(bitcoinRpcService, 'getBlockTemplate').mockReturnValue(Promise.resolve(MockRecording1.BLOCK_TEMPLATE));
         bitcoinRpcService.newBlock$ = newBlockEmitter.asObservable();
 
         const jobIdService = { getNextJobId: jest.fn().mockResolvedValue('1'), getNextTemplateId: jest.fn().mockResolvedValue('1') } as any;
-        stratumV1JobsService = new StratumV1JobsService(bitcoinRpcService, jobIdService);
+        const rpcBlockService = { getProcessedTemplate: jest.fn().mockResolvedValue(null), saveProcessedTemplate: jest.fn().mockResolvedValue(undefined) } as any;
+        stratumV1JobsService = new StratumV1JobsService(bitcoinRpcService, jobIdService, rpcBlockService);
 
         socket = new Socket();
         // jest.spyOn(socket, 'on').mockImplementation((event: string, fn: (data: Buffer) => void) => {

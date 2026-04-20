@@ -29,9 +29,14 @@ export class StratumV1ClientStatistics {
     }
 
 
-    // We don't want to save them here because it can be DB intensive, instead do it every once in
-    // awhile with saveShares()
-    public async addShares(client: ClientEntity, targetDifficulty: number) {
+    /**
+     * Add shares for statistical tracking.
+     * 
+     * PERFORMANCE OPTIMIZATION: All DB writes are now non-blocking.
+     * Statistics are queued in memory and flushed to DB in batches every 5 seconds.
+     * This prevents the stratum event loop from being blocked by synchronous DB I/O.
+     */
+    public addShares(client: ClientEntity, targetDifficulty: number) {
 
         // 10 min
         var coeff = 1000 * 60 * 10;
@@ -48,13 +53,14 @@ export class StratumV1ClientStatistics {
 
 
         if (this.currentTimeSlot == null) {
-            // First record, insert it
+            // First record, queue it for batch insert
 			this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
             this.acceptedCount++;
-            await this.clientStatisticsService.insert({
+            // NON-BLOCKING: queue instead of await
+            this.clientStatisticsService.queueUpdate({
                 time: this.currentTimeSlot,
                 shares: this.shares,
                 acceptedCount: this.acceptedCount,
@@ -65,8 +71,8 @@ export class StratumV1ClientStatistics {
             this.lastSave = new Date().getTime();
         } else if (this.currentTimeSlot != timeSlot) {
             // Transitioning to a new time slot,
-            // First update the old time slot with the latest data
-            await this.clientStatisticsService.update({
+            // Queue update for the old time slot and insert the new one
+            this.clientStatisticsService.queueUpdate({
                 time: this.currentTimeSlot,
                 shares: this.shares,
                 acceptedCount: this.acceptedCount,
@@ -77,11 +83,11 @@ export class StratumV1ClientStatistics {
 			 this.previousShares = this.shares;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
-            // Set the new time slot and add incoming shares then insert it
+            // Set the new time slot and add incoming shares then queue insert
             this.currentTimeSlot = timeSlot;
             this.shares = targetDifficulty;
             this.acceptedCount = 1
-            await this.clientStatisticsService.insert({
+            this.clientStatisticsService.queueUpdate({
                 time: this.currentTimeSlot,
                 shares: this.shares,
                 acceptedCount: this.acceptedCount,
@@ -91,10 +97,10 @@ export class StratumV1ClientStatistics {
             });
             this.lastSave = new Date().getTime();
         } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
-            // If we haven't saved for a minute, update the table
+            // If we haven't saved for a minute, queue an update
             this.shares += targetDifficulty;
             this.acceptedCount++;
-            await this.clientStatisticsService.update({
+            this.clientStatisticsService.queueUpdate({
                 time: this.currentTimeSlot,
                 shares: this.shares,
                 acceptedCount: this.acceptedCount,

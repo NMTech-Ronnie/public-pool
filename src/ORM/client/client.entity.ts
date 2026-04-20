@@ -3,12 +3,7 @@ import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 import { DateTimeTransformer } from '../utils/DateTimeTransformer';
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
-//https://www.sqlite.org/withoutrowid.html
-
-//The WITHOUT ROWID optimization is likely to be helpful for tables that have non-integer
-// or composite (multi-column) PRIMARY KEYs and that do not store large strings or BLOBs.
-//WITHOUT ROWID tables work best when individual rows are not too large.
-@Entity({ withoutRowid: true })
+@Entity()
 @Index(['address', 'clientName', 'sessionId'], { unique: true })
 // Index updatedAt for efficient stale connection cleanup queries
 @Index(['updatedAt'])
@@ -30,7 +25,7 @@ export class ClientEntity extends TrackedEntity {
 
 
 
-    @Column({ type: 'datetime', transformer: new DateTimeTransformer() })
+    @Column({ transformer: new DateTimeTransformer() })
     startTime: Date;
 
     @Column({ type: 'real', default: 0 })

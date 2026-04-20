@@ -29,6 +29,7 @@ import { ExternalSharesService } from './services/external-shares.service';
 import { ChainStateModule } from './ORM/chain-state/chain-state.module';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
+import { PgNotifyModule } from './services/pg-notify.module';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -62,6 +63,7 @@ const ORMModules = [
         }),
         ScheduleModule.forRoot(),
         HttpModule,
+        PgNotifyModule,
         ...ORMModules
     ],
     controllers: [

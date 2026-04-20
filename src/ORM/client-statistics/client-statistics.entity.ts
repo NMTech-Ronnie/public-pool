@@ -6,7 +6,7 @@ import { TrackedEntity } from '../utils/TrackedEntity.entity';
 //Index for getHashRateForSession
 @Index(["address", "clientName", "sessionId"])
 //Index for statistics save
-@Index(["address", "clientName", "sessionId", "time"])
+@Index(["address", "clientName", "sessionId", "time"], { unique: true })
 export class ClientStatisticsEntity extends TrackedEntity {
 
     @PrimaryGeneratedColumn()
